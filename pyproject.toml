@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlagent"
+version = "0.1.0"
+description = "Planning + Coding agents for MLE-bench with Jupyter kernel execution"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "litellm>=1.40",
+    "omegaconf>=2.3",
+    "jsonschema>=4.0",
+    "openai>=1.30",
+    "jupyter_client>=8.0",
+    "ipykernel>=6.0",
+    "nbformat>=5.0",
+    "psutil>=5.9",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["mlagent*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

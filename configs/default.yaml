@@ -1,0 +1,48 @@
+# Default models: gpt-5.1-codex-mini (OpenAI API: Chat Completions + function calling supported)
+# Docs: https://developers.openai.com/api/docs/models/gpt-5.1-codex-mini
+competition_id: spooky-author-identification
+working_dir: ./workspace
+submission_file: submission.csv
+
+jupyter:
+  kernel_name: python3
+  cell_timeout: 600
+  monitor_interval: 300
+  execution_timeout: 7200
+  gpu: "auto"
+  max_cpu_cores: 8
+  max_gpu_count: 1
+
+planning_llm:
+  model_name: gpt-5.1-codex-mini
+  api_key: ""
+  temperature: 1.0
+  max_tokens: 100000
+  timeout: 600
+  max_retries: 3
+  keep_history: true
+
+coding_llm:
+  model_name: gpt-5.1-codex-mini
+  api_key: ""
+  temperature: 1.0
+  max_tokens: 100000
+  timeout: 600
+  max_retries: 3
+  keep_history: true
+  native_function_calling: true
+
+monitor_llm:
+  model_name: gpt-5.1-codex-mini
+  api_key: ""
+  temperature: 0.3
+  max_tokens: 4096
+  timeout: 120
+  max_retries: 2
+  keep_history: false
+
+max_rounds: 10
+max_steps_per_round: 20
+total_time_limit: 14400
+
+trace_prompts: true
