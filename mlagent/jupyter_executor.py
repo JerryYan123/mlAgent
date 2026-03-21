@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import nbformat
+from nbformat.notebooknode import NotebookNode
 from jupyter_client import BlockingKernelClient, KernelManager
 from jupyter_client.kernelspec import KernelSpecManager
 import litellm
@@ -323,19 +324,19 @@ class JupyterExecutor:
                 else:
                     stdout_buf.append(text)
                 nb_outputs.append(
-                    {"output_type": "stream", "name": name, "text": text}
+                    NotebookNode({"output_type": "stream", "name": name, "text": text})
                 )
             elif mtype == "error":
                 success = False
                 tb_lines = content.get("traceback", [])
                 error_text = "\n".join(tb_lines)
                 nb_outputs.append(
-                    {
+                    NotebookNode({
                         "output_type": "error",
                         "ename": content.get("ename", "Error"),
                         "evalue": content.get("evalue", ""),
                         "traceback": tb_lines,
-                    }
+                    })
                 )
 
         if timed_out or llm_term:

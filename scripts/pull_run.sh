@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pull workspace runs from remote server (same pattern as myAgent).
+# Pull workspace runs from remote server.
 # Usage:
 #   bash scripts/pull_run.sh pull              # pull all run_* dirs
 #   bash scripts/pull_run.sh pull "TS1 TS2"  # pull specific timestamp prefixes

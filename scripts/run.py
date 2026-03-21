@@ -5,14 +5,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
-
-from mlagent.config import load_config
-from mlagent.orchestrator import run_experiment
 
 
 def main() -> None:
@@ -24,15 +22,41 @@ def main() -> None:
         nargs="*",
         help="OmegaConf overrides, e.g. max_rounds=3 planning_llm.model_name=o4-mini",
     )
+    p.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Load config + competition only (no LLM / Jupyter run). For setup verification.",
+    )
     args = p.parse_args()
     overrides = list(args.overrides)
     if args.competition:
         overrides.append(f"competition_id={args.competition}")
 
     cfg = load_config(args.config, overrides if overrides else None)
+    if args.check_only:
+        from mlagent.competition_loader import load_competition
+
+        comp = load_competition(cfg.competition_id)
+        print("check-only OK:", cfg.competition_id, "data_dir=", comp.data_dir)
+        return
+
     out = run_experiment(cfg)
     print("Done:", out)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+    print("mlAgent starting...", flush=True)
+    try:
+        from mlagent.config import load_config
+        from mlagent.orchestrator import run_experiment
+
+        main()
+    except Exception as e:
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        sys.exit(1)

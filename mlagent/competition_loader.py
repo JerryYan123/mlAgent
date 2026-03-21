@@ -1,16 +1,9 @@
-"""Resolve myAgent Competition (mle-bench) from sibling checkout."""
+"""Load mle-bench competitions (implemented in `mlagent.competition`)."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+from mlagent.competition import Competition
 
 
-def load_competition(competition_id: str):
-    root = Path(__file__).resolve().parents[2]
-    myagent_root = root / "myAgent"
-    if myagent_root.exists() and str(myagent_root) not in sys.path:
-        sys.path.insert(0, str(myagent_root))
-    from myagent.competition import Competition  # noqa: WPS433
-
+def load_competition(competition_id: str) -> Competition:
     return Competition.from_mlebench(competition_id)

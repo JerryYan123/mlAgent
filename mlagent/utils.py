@@ -48,7 +48,7 @@ def process_backspace_chars(text: str) -> str:
 
 
 def auto_select_gpu() -> str:
-    """Pick GPU with most free memory (same idea as myAgent)."""
+    """Pick GPU with most free memory (nvidia-smi)."""
     try:
         result = subprocess.run(
             [

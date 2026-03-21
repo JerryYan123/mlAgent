@@ -6,6 +6,8 @@ dist/
 build/
 workspace/
 *.log
+_smoke_run.txt
+.smoke_out.txt
 .env
 .venv/
 venv/
