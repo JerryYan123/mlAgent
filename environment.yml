@@ -1,0 +1,9 @@
+# 固定隔离环境名: mlagent
+# 创建: conda env create -f environment.yml
+# 激活: conda activate mlagent
+name: mlagent
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip

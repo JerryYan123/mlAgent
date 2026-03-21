@@ -41,8 +41,9 @@ monitor_llm:
   max_retries: 2
   keep_history: false
 
-max_rounds: 10
-max_steps_per_round: 20
+# 默认偏「可跑完」；全量实验可再加大 max_rounds / max_steps_per_round
+max_rounds: 3
+max_steps_per_round: 10
 total_time_limit: 14400
 
 trace_prompts: true

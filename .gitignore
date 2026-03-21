@@ -5,6 +5,7 @@ __pycache__/
 dist/
 build/
 workspace/
+cache/
 *.log
 _smoke_run.txt
 .smoke_out.txt

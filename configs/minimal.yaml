@@ -1,0 +1,5 @@
+# 最小跑通（少步数、少轮数）。其余项与 dataclass / default.yaml 默认一致。
+# python scripts/run.py --config configs/minimal.yaml
+
+max_rounds: 1
+max_steps_per_round: 6
