@@ -26,6 +26,12 @@ def setup_logging(level: int = logging.INFO) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    try:
+        import litellm
+        litellm.suppress_debug_info = True
+    except Exception:
+        pass
+    os.environ.setdefault("LITELLM_LOG", "ERROR")
 
 
 def process_backspace_chars(text: str) -> str:
