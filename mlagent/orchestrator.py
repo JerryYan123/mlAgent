@@ -47,7 +47,7 @@ def _run_single_agent(
 ) -> None:
     """Run one CodingAgent in its own workspace. Thread-safe."""
     try:
-        coder = CodingAgent(config.coding_llm, tracer=tracer)
+        coder = CodingAgent(config.coding_llm, tracer=tracer, agent_idx=agent_idx)
         summary = coder.run_round(
             plan=plan,
             competition=competition,
@@ -79,11 +79,15 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
         )
     planner_tracer = PromptTracer(planner_trace_dir, enabled=bool(config.trace_prompts))
 
-    logger.info("Loading competition %s", config.competition_id)
+    logger.info("=" * 60)
+    logger.info("Loading competition: %s", config.competition_id)
     competition = load_competition(config.competition_id)
 
     N = config.num_coding_agents
-    logger.info("Using %d parallel coding agent(s) per round", N)
+    logger.info(
+        "Config: %d round(s), %d step(s)/round, %d agent(s)/round",
+        config.max_rounds, config.max_steps_per_round, N,
+    )
 
     planner = PlanningAgent(config, competition, tracer=planner_tracer)
     exp_log = ExperimentLog(run_dir / "experiment_log.json")
@@ -100,9 +104,18 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                 logger.info("Total time limit reached.")
                 break
 
+            elapsed_min = (time.time() - start) / 60
+            logger.info("=" * 60)
+            logger.info(
+                "ROUND %d/%d  (elapsed %.1f min, best_score=%s)",
+                rnd, config.max_rounds, elapsed_min, best_score,
+            )
+            logger.info("-" * 60)
+            logger.info("Planning for %d agent(s)...", N)
             plans = planner.plan_parallel(rnd, last_summary, N)
             for i, p in enumerate(plans):
-                logger.info("Round %s agent %d plan:\n%s", rnd, i, p[:2000])
+                first_line = p.strip().split("\n")[0][:120]
+                logger.info("  Agent %d plan: %s", i, first_line)
 
             agent_dirs: list[Path] = []
             jupyters: list[JupyterExecutor] = []
@@ -150,6 +163,8 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                 for t in threads:
                     t.join()
 
+            logger.info("-" * 60)
+            logger.info("Grading round %d results...", rnd)
             grades = []
             lower = getattr(competition, "is_lower_better", False)
             for i in range(N):
@@ -157,8 +172,15 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                 grade = competition.grade(sub_path)
                 grades.append(grade)
 
-                if getattr(grade, "valid_submission", False) and grade.score is not None:
-                    s = float(grade.score)
+                score_val = getattr(grade, "score", None)
+                valid = getattr(grade, "valid_submission", False)
+                logger.info(
+                    "  Agent %d: score=%s, valid=%s",
+                    i, score_val, valid,
+                )
+
+                if valid and score_val is not None:
+                    s = float(score_val)
                     is_better = False
                     if best_score is None:
                         is_better = True
@@ -170,10 +192,7 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                         shutil.copy(sub_path, run_dir / "best_submission.csv")
                         nb_path = jupyters[i].get_notebook_path()
                         shutil.copy(nb_path, run_dir / "best_experiment.ipynb")
-                        logger.info(
-                            "New best score: %s (agent %d) — saved best_submission.csv",
-                            best_score, i,
-                        )
+                        logger.info("  ★ New best score: %s (agent %d)", best_score, i)
 
             summaries = [r or f"Agent {i} produced no summary." for i, r in enumerate(results)]
             last_summary = format_parallel_summary(summaries, grades, best_score, rnd)
@@ -199,7 +218,11 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                     "notebooks": [str(j.get_notebook_path()) for j in jupyters],
                 },
             )
-            logger.info("Round %s done. Best score: %s", rnd, best_score)
+            elapsed_min = (time.time() - start) / 60
+            logger.info(
+                "Round %d done (%.1f min total). Best score: %s",
+                rnd, elapsed_min, best_score,
+            )
 
             for jup in jupyters:
                 jup.shutdown()
@@ -210,9 +233,13 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
         if best_sub.exists():
             final_sub = run_dir / config.submission_file
             shutil.copy(best_sub, final_sub)
-            logger.info("Restored best submission as final %s", config.submission_file)
         for jup in all_jupyters:
             jup.shutdown()
+
+    total_min = (time.time() - start) / 60
+    logger.info("=" * 60)
+    logger.info("DONE  total=%.1f min  best_score=%s  run_dir=%s", total_min, best_score, run_dir)
+    logger.info("=" * 60)
 
     return {
         "run_dir": str(run_dir),

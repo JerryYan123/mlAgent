@@ -120,9 +120,16 @@ You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, 
 
 
 class CodingAgent:
-    def __init__(self, coding_cfg: LLMConfig, tracer: Optional[PromptTracer] = None) -> None:
+    def __init__(
+        self,
+        coding_cfg: LLMConfig,
+        tracer: Optional[PromptTracer] = None,
+        agent_idx: int = 0,
+    ) -> None:
         self.coding_cfg = coding_cfg
         self.tracer = tracer
+        self.agent_idx = agent_idx
+        self._tag = f"[Agent {agent_idx}]"
 
     def run_round(
         self,
@@ -155,6 +162,7 @@ class CodingAgent:
             step_result = llm.complete_with_tools(tools)
             tool_calls = step_result.tool_calls
             if not tool_calls:
+                logger.info("%s Step %d/%d — no tool call, prompting retry", self._tag, step + 1, max_steps)
                 llm.append_assistant(step_result.content, None)
                 llm.append_user(
                     "You must call one of the tools "
@@ -177,7 +185,18 @@ class CodingAgent:
             llm.messages.append(assistant_msg)
 
             for tc in tool_calls:
+                goal = tc.arguments.get("goal", "")[:80] if isinstance(tc.arguments, dict) else ""
+                logger.info("%s Step %d/%d — %s: %s", self._tag, step + 1, max_steps, tc.name, goal)
                 out = self._dispatch_tool(tc.name, tc.arguments, jupyter, work_dir, submission_name)
+                result_data = {}
+                try:
+                    result_data = json.loads(out) if out.startswith("{") else {}
+                except Exception:
+                    pass
+                ok = result_data.get("success", "?")
+                et = result_data.get("execution_time")
+                et_str = f" ({et:.1f}s)" if isinstance(et, (int, float)) else ""
+                logger.info("%s         → success=%s%s", self._tag, ok, et_str)
                 if self.tracer:
                     self.tracer.write(
                         f"coding_tool_{tc.name}_s{step}",
@@ -186,6 +205,7 @@ class CodingAgent:
                     )
                 llm.append_tool_result(tc.id, out)
 
+        logger.info("%s All %d steps done, generating summary...", self._tag, max_steps)
         llm.append_user(
             "The coding round is over. Provide a concise summary: "
             "what was tried, what worked, what errors occurred, current metrics, "

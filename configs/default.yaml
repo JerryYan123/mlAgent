@@ -1,5 +1,4 @@
-# Default models: gpt-5.1-codex-mini (OpenAI API: Chat Completions + function calling supported)
-# Docs: https://developers.openai.com/api/docs/models/gpt-5.1-codex-mini
+# Default models: gpt-5.4-mini (OpenAI API: Chat Completions + function calling supported)
 competition_id: spooky-author-identification
 working_dir: ./workspace
 submission_file: submission.csv
@@ -13,7 +12,7 @@ jupyter:
   max_gpu_count: 1
 
 planning_llm:
-  model_name: gpt-5.1-codex-mini
+  model_name: gpt-5.4-mini
   api_key: ""
   temperature: 1.0
   max_tokens: 100000
@@ -22,7 +21,7 @@ planning_llm:
   keep_history: true
 
 coding_llm:
-  model_name: gpt-5.1-codex-mini
+  model_name: gpt-5.4-mini
   api_key: ""
   temperature: 1.0
   max_tokens: 100000

@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 
 @dataclass
 class LLMConfig:
-    model_name: str = "gpt-5.1-codex-mini"
+    model_name: str = "gpt-5.4-mini"
     api_key: str = ""
     temperature: float = 1.0
     max_tokens: int = 100000

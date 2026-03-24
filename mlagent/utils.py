@@ -21,6 +21,11 @@ def setup_logging(level: int = logging.INFO) -> None:
             level=level,
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         )
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+    logging.getLogger("litellm").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def process_backspace_chars(text: str) -> str:
