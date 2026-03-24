@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from mlagent.config import AgentConfig
@@ -13,7 +14,24 @@ logger = logging.getLogger(__name__)
 
 
 def _planning_system(competition_description: str, data_preview: str, metric_hint: str) -> str:
-    return f"""You are the planning agent for an MLE-bench competition.
+    return f"""You are an expert ML competition strategist.
+
+Your responsibilities:
+1. Analyze the competition to understand domain, data modality, metric, and key challenges.
+2. Create a multi-round plan with clear progression (baseline -> improvements -> advanced).
+3. Decide strategy based on results: exploit (tune what works), explore (try new approaches),
+   or debug (fix issues).
+4. Adjust your plan based on what actually happened in each round.
+
+Planning guidelines:
+- Round 1: always start with a fast, simple baseline that produces a valid submission.
+- Early rounds: try diverse approaches to find what works best for this data.
+- Later rounds: refine the best approach — tune hyperparameters, improve features,
+  consider ensembling multiple models.
+- If a round failed or timed out, suggest simplifying in the next round.
+- Be specific about what model/approach to use, but adaptable to results.
+- Each round MUST produce a valid submission file.
+- When budget is running low, focus on refining the best approach rather than exploring.
 
 Task description:
 {competition_description}
@@ -23,7 +41,11 @@ Data preview:
 
 Metric: {metric_hint}
 
-Each turn you receive results from a coding agent (Jupyter notebook experiments). Propose a clear, actionable plan for the NEXT coding round: what to implement, try, or debug. Be specific (models, validation, features). Keep the plan under ~800 words."""
+Each turn you receive results from coding agents (Jupyter notebook experiments).
+When multiple coding agents are available, produce diverse plans for each — e.g., one
+tries a baseline while another tries a different model family. Diversity across agents
+maximises the chance of finding a winning approach in each round.
+Propose a clear, actionable plan for each coding agent. Keep each plan under ~800 words."""
 
 
 class PlanningAgent:
@@ -36,6 +58,9 @@ class PlanningAgent:
         self.cfg = cfg
         self.competition = competition
         self.tracer = tracer
+        self.max_rounds = cfg.max_rounds
+        self.max_steps_per_round = cfg.max_steps_per_round
+
         llm_cfg = cfg.planning_llm
         if not llm_cfg.keep_history:
             logger.warning("planning_llm.keep_history should be true for long-term memory")
@@ -50,16 +75,109 @@ class PlanningAgent:
         self.llm.messages = [{"role": "system", "content": sys_prompt}]
 
     def plan(self, round_num: int, last_summary: Optional[str]) -> str:
+        budget = (
+            f"[Budget] Round {round_num}/{self.max_rounds} "
+            f"({self.max_rounds - round_num} remaining), "
+            f"{self.max_steps_per_round} coding steps per round."
+        )
+
         if round_num == 1:
             self.llm.append_user(
-                "Round 1: no prior coding results. Propose the first plan for the coding agent."
+                f"{budget}\n\n"
+                f"Round 1: no prior coding results.\n\n"
+                f"First, create an overall strategy for all {self.max_rounds} rounds — "
+                f"a roadmap of what to try and in what order (baseline, improvements, advanced).\n\n"
+                f"Then, provide the detailed plan for Round 1.\n\n"
+                f"Format:\n"
+                f"## Overall Strategy\n(roadmap for {self.max_rounds} rounds)\n\n"
+                f"## Round 1 Plan\n(specific actions for the coding agent this round)"
             )
         else:
             self.llm.append_user(
-                f"Results from previous round(s):\n{last_summary or '(none)'}\n\n"
-                f"Propose the plan for round {round_num}."
+                f"{budget}\n\n"
+                f"Results from round {round_num - 1}:\n{last_summary or '(none)'}\n\n"
+                f"Review your overall strategy and adjust if needed based on these results. "
+                f"Then provide the plan for round {round_num}."
             )
         reply = self.llm.chat()
         if self.tracer:
             self.tracer.write(f"planning_r{round_num}", str(self.llm.messages[-2:]), reply)
         return reply
+
+    def plan_parallel(
+        self,
+        round_num: int,
+        last_summary: Optional[str],
+        num_agents: int,
+    ) -> list[str]:
+        """Generate plans for N coding agents.
+
+        When num_agents == 1 this delegates to plan() directly.
+        When num_agents > 1 it asks the planner for N diverse sub-plans
+        using ``## Agent 0 Plan`` / ``## Agent 1 Plan`` headers.
+        """
+        if num_agents <= 1:
+            return [self.plan(round_num, last_summary)]
+
+        budget = (
+            f"[Budget] Round {round_num}/{self.max_rounds} "
+            f"({self.max_rounds - round_num} remaining), "
+            f"{self.max_steps_per_round} coding steps per round, "
+            f"{num_agents} parallel coding agents."
+        )
+
+        if round_num == 1:
+            self.llm.append_user(
+                f"{budget}\n\n"
+                f"Round 1: no prior coding results.\n\n"
+                f"You have {num_agents} coding agents running in parallel this round. "
+                f"Produce {num_agents} **diverse** plans — each agent should try a clearly "
+                f"different approach so we explore the solution space efficiently.\n\n"
+                f"First, create an overall strategy for all {self.max_rounds} rounds — "
+                f"a roadmap of what to try and in what order.\n\n"
+                f"Then provide plans using these exact headers:\n"
+                + "\n".join(
+                    f"## Agent {i} Plan\n(specific actions for agent {i})"
+                    for i in range(num_agents)
+                )
+            )
+        else:
+            self.llm.append_user(
+                f"{budget}\n\n"
+                f"Results from round {round_num - 1}:\n{last_summary or '(none)'}\n\n"
+                f"You have {num_agents} coding agents running in parallel this round. "
+                f"Review your overall strategy and adjust if needed based on these results. "
+                f"Then provide {num_agents} diverse plans using these exact headers:\n"
+                + "\n".join(
+                    f"## Agent {i} Plan\n(specific actions for agent {i})"
+                    for i in range(num_agents)
+                )
+            )
+
+        reply = self.llm.chat()
+        if self.tracer:
+            self.tracer.write(f"planning_r{round_num}", str(self.llm.messages[-2:]), reply)
+
+        plans = self._parse_agent_plans(reply, num_agents)
+        return plans
+
+    @staticmethod
+    def _parse_agent_plans(text: str, num_agents: int) -> list[str]:
+        """Split LLM reply by ``## Agent N Plan`` headers."""
+        pattern = r"##\s+Agent\s+(\d+)\s+Plan"
+        splits = list(re.finditer(pattern, text, re.IGNORECASE))
+        if len(splits) < num_agents:
+            logger.warning(
+                "Could not parse %d agent plans (found %d headers), "
+                "replicating full plan for all agents",
+                num_agents,
+                len(splits),
+            )
+            return [text] * num_agents
+
+        plans: list[str] = []
+        for idx, match in enumerate(splits):
+            start = match.end()
+            end = splits[idx + 1].start() if idx + 1 < len(splits) else len(text)
+            plans.append(text[start:end].strip())
+        return plans[:num_agents]

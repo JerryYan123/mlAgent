@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from mlagent.config import AgentConfig, LLMConfig
+from mlagent.config import LLMConfig
 from mlagent.jupyter_executor import ExecutionResult, JupyterExecutor
 from mlagent.llm import ToolCallingLLM
 from mlagent.utils import PromptTracer
@@ -35,6 +35,29 @@ def build_tools(submission_name: str) -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "edit_cell",
+                "description": (
+                    "Edit a previously executed cell by search-and-replace, "
+                    "then re-execute the modified code. Use for bug fixes or small parameter changes."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cell_index": {
+                            "type": "integer",
+                            "description": "0-based index of the cell to edit (from execution history)",
+                        },
+                        "search": {"type": "string", "description": "Exact text to find in the cell"},
+                        "replace": {"type": "string", "description": "Replacement text"},
+                        "goal": {"type": "string", "description": "What this edit should accomplish"},
+                    },
+                    "required": ["cell_index", "search", "replace", "goal"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "check_submission",
                 "description": f"Check if {submission_name} exists in the workspace; returns head/shape info.",
                 "parameters": {"type": "object", "properties": {}},
@@ -55,23 +78,6 @@ def build_tools(submission_name: str) -> list[dict[str, Any]]:
                 },
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "finish_round",
-                "description": "End this coding round and return a short summary for the planning agent.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "summary": {
-                            "type": "string",
-                            "description": "What was tried, metrics printed, issues, next hints",
-                        },
-                    },
-                    "required": ["summary"],
-                },
-            },
-        },
     ]
 
 
@@ -86,11 +92,31 @@ Competition description (excerpt):
 Plan from planning agent:
 {plan}
 
-You MUST use tools. Typical flow: execute_cell for experiments, check_submission when appropriate, finish_round when done.
-Rules:
-- Use relative paths; data under input/
-- One execute_cell should be focused; you can call it many times
-- Call finish_round with a concise summary when the round objective is met or you cannot proceed"""
+You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, read_file.
+
+## Workflow
+- Start by loading and briefly exploring the data.
+- Build a working baseline that produces a valid {submission_name} as early as possible.
+- Once you have a valid submission, iterate to improve: tune hyperparameters, try different
+  features or models, and check the effect on your validation metric.
+- Use check_submission to verify your output file before finishing.
+
+## Bug Handling
+- If a cell errors, read the traceback carefully and fix the specific issue.
+- Use edit_cell to make small fixes to a previous cell instead of rewriting from scratch.
+- If the same error keeps recurring, simplify your approach.
+
+## Iteration Strategy
+- After getting a working model, try variations: regularization strength, learning rate,
+  feature count, number of folds, different algorithms.
+- Keep changes small and measurable — change one thing at a time when tuning.
+- Always print your validation metric so you can track improvements.
+
+## Rules
+- Use relative paths; data is under input/
+- Each execute_cell should be focused on one task
+- The kernel state persists: variables from earlier cells are available in later ones
+- Prioritize having a valid {submission_name} over complex approaches"""
 
 
 class CodingAgent:
@@ -110,18 +136,30 @@ class CodingAgent:
         llm = ToolCallingLLM(self.coding_cfg)
         llm.set_system(_coding_system(plan, competition, work_dir, submission_name))
         llm.append_user(
-            "Start the round: call execute_cell or other tools. End with finish_round."
+            "Start the round. Use tools to implement the plan. "
+            f"You have {max_steps} steps available."
         )
         tools = build_tools(submission_name)
-        summary = ""
+
         for step in range(max_steps):
+            if step > 0:
+                remaining = max_steps - step
+                status = f"[Status] Step {step + 1}/{max_steps} ({remaining} remaining)."
+                if remaining <= 2:
+                    status += (
+                        f" You are running low on steps. "
+                        f"Prioritize producing a valid {submission_name} now."
+                    )
+                llm.append_user(status)
+
             step_result = llm.complete_with_tools(tools)
-            raw = step_result.raw_message
             tool_calls = step_result.tool_calls
             if not tool_calls:
-                # nudge model to use tools
                 llm.append_assistant(step_result.content, None)
-                llm.append_user("You must call one of the tools (execute_cell, check_submission, read_file, finish_round).")
+                llm.append_user(
+                    "You must call one of the tools "
+                    "(execute_cell, edit_cell, check_submission, read_file)."
+                )
                 continue
 
             assistant_msg = {
@@ -147,11 +185,16 @@ class CodingAgent:
                         out[:8000],
                     )
                 llm.append_tool_result(tc.id, out)
-                if tc.name == "finish_round":
-                    summary = tc.arguments.get("summary", "") or out
-                    return summary
 
-        return summary or "Round ended without finish_round; step limit reached."
+        llm.append_user(
+            "The coding round is over. Provide a concise summary: "
+            "what was tried, what worked, what errors occurred, current metrics, "
+            "and suggestions for the next round."
+        )
+        summary = llm.chat_no_tools()
+        if self.tracer:
+            self.tracer.write("coding_summary", "", summary)
+        return summary or "Round ended; no summary generated."
 
     def _dispatch_tool(
         self,
@@ -168,11 +211,38 @@ class CodingAgent:
             return json.dumps(
                 {
                     "success": r.success,
-                    "llm_terminated": r.llm_terminated,
                     "timeout": r.timeout,
                     "output": r.output[:20000],
                     "error": (r.error or "")[:8000],
                     "execution_time": r.execution_time,
+                },
+                ensure_ascii=False,
+            )
+        if name == "edit_cell":
+            cell_index = int(args.get("cell_index", -1))
+            search = args.get("search", "")
+            replace = args.get("replace", "")
+            goal = args.get("goal", "")
+            if cell_index < 0 or cell_index >= len(jupyter.nb.cells):
+                return json.dumps(
+                    {"success": False, "error": f"Invalid cell_index {cell_index}. "
+                     f"Valid range: 0-{len(jupyter.nb.cells) - 1}."}
+                )
+            old_source = jupyter.nb.cells[cell_index].source
+            if search not in old_source:
+                return json.dumps(
+                    {"success": False, "error": "Search string not found in the specified cell."}
+                )
+            new_source = old_source.replace(search, replace, 1)
+            r = jupyter.execute_cell(new_source, goal)
+            return json.dumps(
+                {
+                    "success": r.success,
+                    "timeout": r.timeout,
+                    "output": r.output[:20000],
+                    "error": (r.error or "")[:8000],
+                    "execution_time": r.execution_time,
+                    "edited_cell": cell_index,
                 },
                 ensure_ascii=False,
             )
@@ -203,6 +273,4 @@ class CodingAgent:
             if len(lines) > max_lines:
                 text += f"\n... ({len(lines) - max_lines} more lines)"
             return text
-        if name == "finish_round":
-            return json.dumps({"ok": True, "summary": args.get("summary", "")}, ensure_ascii=False)
         return f"unknown tool {name}"

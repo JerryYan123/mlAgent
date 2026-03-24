@@ -129,6 +129,21 @@ class ToolCallingLLM:
             )
         raise RuntimeError("complete_with_tools failed after retries")
 
+    def chat_no_tools(self) -> str:
+        """Plain text completion without tool definitions (for summarization)."""
+        for attempt in range(self.config.max_retries):
+            try:
+                resp = self._call(messages=self.messages)
+            except Exception:
+                if attempt == self.config.max_retries - 1:
+                    return ""
+                continue
+            content = resp.choices[0].message.content or ""
+            if content:
+                self.messages.append({"role": "assistant", "content": content})
+                return content
+        return ""
+
 
 class PlanningLLM:
     """Simple chat with history for planning (no tools)."""

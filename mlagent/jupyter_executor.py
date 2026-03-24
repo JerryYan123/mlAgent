@@ -1,4 +1,4 @@
-"""Persistent Jupyter kernel execution (adapted from comind-new jupyter_session)."""
+"""Persistent Jupyter kernel execution with health monitoring and auto-restart."""
 
 from __future__ import annotations
 
@@ -18,11 +18,10 @@ import nbformat
 from nbformat.notebooknode import NotebookNode
 from jupyter_client import BlockingKernelClient, KernelManager
 from jupyter_client.kernelspec import KernelSpecManager
-import litellm
 import psutil
 
-from mlagent.config import JupyterConfig, LLMConfig
-from mlagent.utils import extract_xml_tag, process_backspace_chars
+from mlagent.config import JupyterConfig
+from mlagent.utils import process_backspace_chars
 
 logger = logging.getLogger(__name__)
 
@@ -30,70 +29,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ExecutionResult:
     success: bool
-    llm_terminated: bool
     timeout: bool
     output: str
     error: str
     execution_time: float
-
-
-def _monitor_llm_decision(
-    monitor_cfg: LLMConfig,
-    code: str,
-    goal: str,
-    output: str,
-    run_time: float,
-    execution_timeout: int,
-) -> tuple[bool, str]:
-    """Return (should_continue, explanation)."""
-    lines = output.splitlines()
-    if len(lines) > 500:
-        output = "\n".join(lines[:250] + ["... (truncated) ..."] + lines[-250:])
-
-    remaining = max(0.0, execution_timeout - run_time)
-    user = f"""Code:
-```python
-{code}
-```
-Goal: {goal}
-Runtime: {run_time:.1f}s / {execution_timeout}s max. Remaining: {remaining:.1f}s.
-
-Output:
-```
-{process_backspace_chars(output)}
-```
-
-Respond with:
-<action>CONTINUE</action> or <action>STOP</action>
-<explanation>Brief reason.</explanation>
-"""
-    messages = [
-        {
-            "role": "system",
-            "content": "You monitor long-running ML code. Say CONTINUE if training looks healthy, STOP if stuck/broken or cannot finish in time.",
-        },
-        {"role": "user", "content": user},
-    ]
-    for _ in range(monitor_cfg.max_retries):
-        try:
-            resp = litellm.completion(
-                model=monitor_cfg.model_name,
-                messages=messages,
-                api_key=monitor_cfg.api_key or os.environ.get("OPENAI_API_KEY"),
-                max_tokens=monitor_cfg.max_tokens,
-                temperature=monitor_cfg.temperature,
-                timeout=monitor_cfg.timeout,
-            )
-            text = resp.choices[0].message.content or ""
-            action = extract_xml_tag(text, "action") or ""
-            expl = extract_xml_tag(text, "explanation") or text
-            should_continue = "continue" in action.lower() and "stop" not in action.lower()
-            if "stop" in action.lower():
-                should_continue = False
-            return should_continue, expl
-        except Exception as e:
-            logger.warning("monitor llm error: %s", e)
-    return True, "monitor failed; default continue"
 
 
 class JupyterExecutor:
@@ -102,13 +41,11 @@ class JupyterExecutor:
         work_dir: str | Path,
         data_dir: str | Path,
         jupyter_cfg: JupyterConfig,
-        monitor_llm: LLMConfig,
         env_name: str | None = None,
     ) -> None:
         self.work_dir = Path(work_dir).resolve()
         self.data_dir = Path(data_dir).resolve()
         self.cfg = jupyter_cfg
-        self.monitor_llm = monitor_llm
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
         inp = self.work_dir / "input"
@@ -128,13 +65,16 @@ class JupyterExecutor:
         kernel_name = env_name or hashlib.md5(str(self.work_dir).encode()).hexdigest()[:12]
         self._kernel_spec_name = self._install_kernel_spec(kernel_name)
 
+        self._start_kernel()
+        atexit.register(self._safe_shutdown)
+
+    def _start_kernel(self) -> None:
         self.km = KernelManager(kernel_name=self._kernel_spec_name)
         self.km.start_kernel(cwd=str(self.work_dir))
         self.kc: BlockingKernelClient = self.km.client()
         self.kc.start_channels()
         self.kc.wait_for_ready(timeout=120)
         self._closed = False
-        atexit.register(self._safe_shutdown)
 
     def _select_optimal_resources(self) -> tuple[list[int], list[int]]:
         cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
@@ -249,13 +189,10 @@ class JupyterExecutor:
         self._safe_shutdown()
 
     def restart_kernel(self) -> None:
+        logger.warning("Restarting Jupyter kernel...")
         self._safe_shutdown()
-        self._closed = False
-        self.km = KernelManager(kernel_name=self._kernel_spec_name)
-        self.km.start_kernel(cwd=str(self.work_dir))
-        self.kc = self.km.client()
-        self.kc.start_channels()
-        self.kc.wait_for_ready(timeout=120)
+        self._start_kernel()
+        logger.info("Kernel restarted successfully.")
 
     def get_notebook_path(self) -> Path:
         return self.notebook_path
@@ -266,38 +203,37 @@ class JupyterExecutor:
     def _collect_iopub(
         self,
         msg_id: str,
-        code: str,
-        goal: str,
         cell_timeout: int,
     ) -> tuple[ExecutionResult, list[dict[str, Any]]]:
         stdout_buf: list[str] = []
         stderr_buf: list[str] = []
         nb_outputs: list[dict[str, Any]] = []
         error_text = ""
-        success, llm_term, timed_out = True, False, False
+        success, timed_out = True, False
         start = time.time()
-        last_check = start
-        exec_cap = min(self.cfg.execution_timeout, cell_timeout * 20)
+        last_health_check = start
 
         while True:
             now = time.time()
             elapsed = now - start
-            if now - last_check >= self.cfg.monitor_interval:
-                last_check = now
-                out_so_far = "".join(stdout_buf) + "".join(stderr_buf)
-                cont, expl = _monitor_llm_decision(
-                    self.monitor_llm,
-                    code,
-                    goal,
-                    out_so_far,
-                    elapsed,
-                    exec_cap,
-                )
-                if not cont:
-                    llm_term = True
-                    error_text = expl
-                    success = False
-                    break
+
+            if now - last_health_check >= self.cfg.monitor_interval:
+                last_health_check = now
+                if not self.km.is_alive():
+                    logger.error("Kernel died during execution (possible OOM/segfault)")
+                    out_so_far = process_backspace_chars("".join(stdout_buf))
+                    self.restart_kernel()
+                    return (
+                        ExecutionResult(
+                            success=False,
+                            timeout=False,
+                            output=out_so_far,
+                            error="Kernel crashed (possible OOM). Kernel has been restarted. "
+                                  "Try simplifying your code or reducing memory usage.",
+                            execution_time=elapsed,
+                        ),
+                        nb_outputs,
+                    )
 
             if elapsed > cell_timeout:
                 timed_out = True
@@ -339,7 +275,8 @@ class JupyterExecutor:
                     })
                 )
 
-        if timed_out or llm_term:
+        if timed_out:
+            error_text = f"Cell timed out after {cell_timeout}s. Try reducing computation or splitting into smaller steps."
             try:
                 self.km.interrupt_kernel()
             except Exception:
@@ -353,14 +290,13 @@ class JupyterExecutor:
             out = out + "\n" + err
 
         et = time.time() - start
-        ok = success and not timed_out and not llm_term
+        ok = success and not timed_out
         return (
             ExecutionResult(
                 success=ok,
-                llm_terminated=llm_term,
                 timeout=timed_out,
                 output=out,
-                error=error_text if llm_term else (err if not ok else ""),
+                error=error_text if not ok else "",
                 execution_time=et,
             ),
             nb_outputs,
@@ -368,8 +304,19 @@ class JupyterExecutor:
 
     def execute_cell(self, code: str, goal: str, timeout: int | None = None) -> ExecutionResult:
         cell_timeout = timeout if timeout is not None else self.cfg.cell_timeout
-        msg_id = self.kc.execute(code, allow_stdin=False, store_history=True, stop_on_error=True)
-        result, nb_outputs = self._collect_iopub(msg_id, code, goal, cell_timeout)
+
+        if not self.km.is_alive():
+            logger.warning("Kernel not alive before execution, restarting...")
+            self.restart_kernel()
+
+        try:
+            msg_id = self.kc.execute(code, allow_stdin=False, store_history=True, stop_on_error=True)
+        except Exception:
+            logger.warning("kc.execute failed, restarting kernel and retrying...")
+            self.restart_kernel()
+            msg_id = self.kc.execute(code, allow_stdin=False, store_history=True, stop_on_error=True)
+
+        result, nb_outputs = self._collect_iopub(msg_id, cell_timeout)
         cell = nbformat.v4.new_code_cell(source=code)
         cell.outputs = nb_outputs
         cell.execution_count = len(self.nb.cells) + 1

@@ -2,8 +2,6 @@
 
 双智能体（Planning + Coding），数据与评分走 **mle-bench**。用法与 **myAgent** 相同：**进目录 → 激活 conda → `python` / `nohup python ...`**，主入口只有 **`scripts/run.py`**。
 
-**已验证可跑通：** 本机（Mac）与 Pitt 云上均可完成 `conda` 环境 + `pip install -e .`；自检命令 **`python scripts/run.py --check-only`** 在本机已通过（云上装好 `../mle-bench` 后同样执行即可）。
-
 ---
 
 ## Current（云上）
@@ -51,7 +49,6 @@ conda activate mlagent
 pip install -e .
 pip install -e ../mle-bench
 
-python scripts/run.py --check-only
 export OPENAI_API_KEY=sk-...
 ```
 
@@ -67,7 +64,6 @@ conda activate mlagent
 cd ~/Desktop/ai4mle-research/mlAgent
 export OPENAI_API_KEY=...
 python -u scripts/run.py --config configs/default.yaml
-# 或轻量：configs/minimal.yaml
 ```
 
 覆盖示例：`python -u scripts/run.py max_rounds=1 max_steps_per_round=6`
@@ -96,7 +92,7 @@ bash scripts/pull_run.sh clear
 
 ```
 mlagent/              # Python 包
-configs/              # default.yaml, minimal.yaml
+configs/              # default.yaml
 scripts/run.py        # 唯一入口
 environment.yml       # conda 环境名 mlagent
 workspace/            # 运行产物，gitignore

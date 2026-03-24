@@ -22,24 +22,12 @@ def main() -> None:
         nargs="*",
         help="OmegaConf overrides, e.g. max_rounds=3 planning_llm.model_name=o4-mini",
     )
-    p.add_argument(
-        "--check-only",
-        action="store_true",
-        help="Load config + competition only (no LLM / Jupyter run). For setup verification.",
-    )
     args = p.parse_args()
     overrides = list(args.overrides)
     if args.competition:
         overrides.append(f"competition_id={args.competition}")
 
     cfg = load_config(args.config, overrides if overrides else None)
-    if args.check_only:
-        from mlagent.competition_loader import load_competition
-
-        comp = load_competition(cfg.competition_id)
-        print("check-only OK:", cfg.competition_id, "data_dir=", comp.data_dir)
-        return
-
     out = run_experiment(cfg)
     print("Done:", out)
 

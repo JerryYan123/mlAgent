@@ -24,11 +24,10 @@ class LLMConfig:
 @dataclass
 class JupyterConfig:
     kernel_name: str = "python3"
-    cell_timeout: int = 600
-    monitor_interval: int = 300
-    """Seconds between LLM execution-health checks during a long cell."""
-    execution_timeout: int = 7200
-    """Max seconds for a single cell (also used as cap in monitor prompts)."""
+    cell_timeout: int = 900
+    """Max seconds for a single cell before interrupt (15 min)."""
+    monitor_interval: int = 120
+    """Seconds between kernel health checks during a long cell."""
     gpu: Optional[str] = "auto"
     max_cpu_cores: int = 8
     max_gpu_count: int = 1
@@ -42,11 +41,10 @@ class AgentConfig:
 
     planning_llm: LLMConfig = field(default_factory=LLMConfig)
     coding_llm: LLMConfig = field(default_factory=LLMConfig)
-    monitor_llm: LLMConfig = field(default_factory=LLMConfig)
-    """Used for Jupyter execution monitoring; defaults same as coding if unset in YAML."""
 
     jupyter: JupyterConfig = field(default_factory=JupyterConfig)
 
+    num_coding_agents: int = 1
     max_rounds: int = 10
     max_steps_per_round: int = 20
     total_time_limit: int = 14400

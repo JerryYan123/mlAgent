@@ -6,9 +6,8 @@ submission_file: submission.csv
 
 jupyter:
   kernel_name: python3
-  cell_timeout: 600
-  monitor_interval: 300
-  execution_timeout: 7200
+  cell_timeout: 900
+  monitor_interval: 120
   gpu: "auto"
   max_cpu_cores: 8
   max_gpu_count: 1
@@ -32,16 +31,7 @@ coding_llm:
   keep_history: true
   native_function_calling: true
 
-monitor_llm:
-  model_name: gpt-5.1-codex-mini
-  api_key: ""
-  temperature: 0.3
-  max_tokens: 4096
-  timeout: 120
-  max_retries: 2
-  keep_history: false
-
-# 默认偏「可跑完」；全量实验可再加大 max_rounds / max_steps_per_round
+num_coding_agents: 1
 max_rounds: 3
 max_steps_per_round: 10
 total_time_limit: 14400

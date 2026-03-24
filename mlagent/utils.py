@@ -156,6 +156,27 @@ def format_summary(
     return "\n\n".join(parts)
 
 
+def format_parallel_summary(
+    agent_summaries: list[str],
+    grades: list[Any],
+    best_score: float | None,
+    round_num: int,
+) -> str:
+    """Merge results from N parallel coding agents into one summary for the planner."""
+    parts = [f"=== After round {round_num} ({len(agent_summaries)} agent(s)) ==="]
+    for i, (summary, grade) in enumerate(zip(agent_summaries, grades)):
+        sc = getattr(grade, "score", None)
+        valid = getattr(grade, "valid_submission", False)
+        err = getattr(grade, "error", None)
+        parts.append(
+            f"--- Agent {i} ---\n{summary}\n"
+            f"Grade: score={sc}, valid={valid}, error={err}"
+        )
+    if best_score is not None:
+        parts.append(f"Global best score so far: {best_score}")
+    return "\n\n".join(parts)
+
+
 def extract_xml_tag(text: str, tag: str) -> str | None:
     """Extract first <tag>...</tag> content."""
     pat = rf"<{tag}>\s*(.*?)\s*</{tag}>"
