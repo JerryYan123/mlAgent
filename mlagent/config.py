@@ -44,6 +44,8 @@ class AgentConfig:
 
     jupyter: JupyterConfig = field(default_factory=JupyterConfig)
 
+    planning_strategy: str = "baseline"
+    replan_interval: int = 5
     num_coding_agents: int = 1
     max_rounds: int = 10
     max_steps_per_round: int = 20

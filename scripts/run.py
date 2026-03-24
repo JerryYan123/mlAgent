@@ -41,7 +41,7 @@ if __name__ == "__main__":
     print("mlAgent starting...", flush=True)
     try:
         from mlagent.config import load_config
-        from mlagent.orchestrator import run_experiment
+        from mlagent.orchestrator_strategies import run_experiment
 
         main()
     except Exception as e:

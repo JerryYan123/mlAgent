@@ -1,4 +1,6 @@
-# Default models: gpt-5.4-mini (OpenAI API: Chat Completions + function calling supported)
+# Strategy: board_replan — Experiment Board + inner-loop replanning
+# Planner maintains a persistent board of insights/experiments/hypotheses.
+# Every replan_interval steps, coder pauses and planner re-engages with updated board.
 competition_id: spooky-author-identification
 working_dir: ./workspace
 submission_file: submission.csv
@@ -30,7 +32,7 @@ coding_llm:
   keep_history: true
   native_function_calling: true
 
-planning_strategy: baseline
+planning_strategy: board_replan
 replan_interval: 5
 num_coding_agents: 1
 max_rounds: 10
