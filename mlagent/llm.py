@@ -12,6 +12,7 @@ from typing import Any
 from litellm import completion
 
 from mlagent.config import LLMConfig
+from mlagent.utils import TokenTracker
 
 
 @dataclass
@@ -33,7 +34,12 @@ class LLMStepResult:
 class ToolCallingLLM:
     """Conversation + tools via LiteLLM (same path for Codex and other models)."""
 
-    def __init__(self, config: LLMConfig, **overrides: Any) -> None:
+    def __init__(
+        self,
+        config: LLMConfig,
+        tracker: TokenTracker | None = None,
+        **overrides: Any,
+    ) -> None:
         self.config = deepcopy(config)
         for k, v in overrides.items():
             if hasattr(self.config, k):
@@ -43,6 +49,7 @@ class ToolCallingLLM:
             native = True
         self.use_native_fc = bool(native)
         self.messages: list[dict[str, Any]] = []
+        self.tracker = tracker
         self._call = partial(
             completion,
             model=self.config.model_name,
@@ -96,6 +103,7 @@ class ToolCallingLLM:
                 if attempt == self.config.max_retries - 1:
                     raise
                 continue
+            self._track_usage(resp)
             choice = resp.choices[0]
             msg = choice.message
             tcs: list[ToolCall] = []
@@ -129,6 +137,16 @@ class ToolCallingLLM:
             )
         raise RuntimeError("complete_with_tools failed after retries")
 
+    def _track_usage(self, resp: Any) -> None:
+        if self.tracker is None:
+            return
+        usage = getattr(resp, "usage", None)
+        if usage:
+            pt = getattr(usage, "prompt_tokens", 0) or 0
+            ct = getattr(usage, "completion_tokens", 0) or 0
+            if pt or ct:
+                self.tracker.add(pt, ct)
+
     def chat_no_tools(self) -> str:
         """Plain text completion without tool definitions (for summarization)."""
         for attempt in range(self.config.max_retries):
@@ -138,6 +156,7 @@ class ToolCallingLLM:
                 if attempt == self.config.max_retries - 1:
                     return ""
                 continue
+            self._track_usage(resp)
             content = resp.choices[0].message.content or ""
             if content:
                 self.messages.append({"role": "assistant", "content": content})
@@ -148,12 +167,18 @@ class ToolCallingLLM:
 class PlanningLLM:
     """Simple chat with history for planning (no tools)."""
 
-    def __init__(self, config: LLMConfig, **overrides: Any) -> None:
+    def __init__(
+        self,
+        config: LLMConfig,
+        tracker: TokenTracker | None = None,
+        **overrides: Any,
+    ) -> None:
         self.config = deepcopy(config)
         for k, v in overrides.items():
             if hasattr(self.config, k):
                 setattr(self.config, k, v)
         self.messages: list[dict[str, Any]] = []
+        self.tracker = tracker
         self._call = partial(
             completion,
             model=self.config.model_name,
@@ -169,6 +194,12 @@ class PlanningLLM:
     def chat(self) -> str:
         for _ in range(self.config.max_retries):
             resp = self._call(messages=self.messages)
+            usage = getattr(resp, "usage", None)
+            if usage and self.tracker:
+                pt = getattr(usage, "prompt_tokens", 0) or 0
+                ct = getattr(usage, "completion_tokens", 0) or 0
+                if pt or ct:
+                    self.tracker.add(pt, ct)
             content = resp.choices[0].message.content or ""
             if content:
                 self.messages.append({"role": "assistant", "content": content})

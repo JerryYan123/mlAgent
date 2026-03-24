@@ -19,6 +19,7 @@ from mlagent.planning_agent import PlanningAgent
 from mlagent.utils import (
     ExperimentLog,
     PromptTracer,
+    TokenTracker,
     format_parallel_summary,
     setup_logging,
     auto_select_gpu,
@@ -44,10 +45,11 @@ def _run_single_agent(
     agent_dir: Path,
     tracer: PromptTracer,
     results: list[Optional[str]],
+    tracker: Optional[TokenTracker] = None,
 ) -> None:
     """Run one CodingAgent in its own workspace. Thread-safe."""
     try:
-        coder = CodingAgent(config.coding_llm, tracer=tracer, agent_idx=agent_idx)
+        coder = CodingAgent(config.coding_llm, tracer=tracer, agent_idx=agent_idx, tracker=tracker)
         summary = coder.run_round(
             plan=plan,
             competition=competition,
@@ -89,7 +91,8 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
         config.max_rounds, config.max_steps_per_round, N,
     )
 
-    planner = PlanningAgent(config, competition, tracer=planner_tracer)
+    tracker = TokenTracker()
+    planner = PlanningAgent(config, competition, tracer=planner_tracer, tracker=tracker)
     exp_log = ExperimentLog(run_dir / "experiment_log.json")
 
     last_summary: Optional[str] = None
@@ -111,8 +114,10 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                 rnd, config.max_rounds, elapsed_min, best_score,
             )
             logger.info("-" * 60)
+            snap_before_plan = tracker.snapshot()
             logger.info("Planning for %d agent(s)...", N)
             plans = planner.plan_parallel(rnd, last_summary, N)
+            snap_after_plan = tracker.snapshot()
             for i, p in enumerate(plans):
                 first_line = p.strip().split("\n")[0][:120]
                 logger.info("  Agent %d plan: %s", i, first_line)
@@ -146,6 +151,7 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                 _run_single_agent(
                     0, config, plans[0], competition,
                     jupyters[0], agent_dirs[0], agent_tracers[0], results,
+                    tracker=tracker,
                 )
             else:
                 threads: list[threading.Thread] = []
@@ -155,6 +161,7 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                         args=(
                             i, config, plans[i], competition,
                             jupyters[i], agent_dirs[i], agent_tracers[i], results,
+                            tracker,
                         ),
                         name=f"agent-{i}",
                     )
@@ -200,6 +207,18 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
             combined_plan = "\n---\n".join(
                 f"Agent {i}: {plans[i][:500]}" for i in range(N)
             )
+            snap_after_code = tracker.snapshot()
+            plan_in = snap_after_plan[0] - snap_before_plan[0]
+            plan_out = snap_after_plan[1] - snap_before_plan[1]
+            code_in = snap_after_code[0] - snap_after_plan[0]
+            code_out = snap_after_code[1] - snap_after_plan[1]
+            round_cost = TokenTracker.estimate_cost(
+                plan_in + code_in, plan_out + code_out, config.coding_llm.model_name,
+            )
+            logger.info(
+                "  Tokens: plan %d/%d, code %d/%d (est $%.4f)",
+                plan_in, plan_out, code_in, code_out, round_cost or 0,
+            )
             exp_log.log_round(
                 rnd,
                 combined_plan,
@@ -215,7 +234,9 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                         }
                         for i, g in enumerate(grades)
                     ],
-                    "notebooks": [str(j.get_notebook_path()) for j in jupyters],
+                    "plan_tokens": {"input": plan_in, "output": plan_out},
+                    "code_tokens": {"input": code_in, "output": code_out},
+                    "estimated_cost_usd": round_cost,
                 },
             )
             elapsed_min = (time.time() - start) / 60

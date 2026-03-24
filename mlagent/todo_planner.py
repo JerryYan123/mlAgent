@@ -8,7 +8,7 @@ from typing import Any, Optional
 from mlagent.config import AgentConfig
 from mlagent.experiment_board import TodoList
 from mlagent.llm import PlanningLLM
-from mlagent.utils import PromptTracer
+from mlagent.utils import PromptTracer, TokenTracker
 
 logger = logging.getLogger(__name__)
 
@@ -16,24 +16,26 @@ logger = logging.getLogger(__name__)
 def _todo_system(competition_description: str, data_preview: str, metric_hint: str) -> str:
     return f"""You are an ML competition strategist that works by managing a Todo List.
 
-Instead of writing prose plans, you maintain a structured checklist of tasks.
-Each task is a concrete, testable action with a hypothesis for why it should help.
+The coding agent works autonomously with many steps per round. It can build multiple
+models, do stacking, and calibrate — all within one round. Your todo list tells it
+WHAT to accomplish. The agent handles debugging on its own.
 
 Your todo list format (one item per line):
   - [ ] Task description (why: hypothesis for why this helps)
 
-Guidelines:
-- Start with 5-8 focused tasks covering: data exploration, baseline, feature engineering,
-  model selection, and submission generation.
-- Each task should be independently executable in a Jupyter cell.
-- Order tasks by priority: baseline + valid submission FIRST, then improvements.
-- After seeing results, you can revise the list:
-  - Mark completed tasks (they'll be shown as [x])
-  - Add new tasks based on findings
-  - Remove tasks that are no longer relevant
-  - Reorder remaining tasks
-- Always ensure at least one task targets producing a valid submission file.
-- When budget is low, trim the list to only essential remaining tasks.
+## Suggested Task Types
+- Build a baseline model + valid submission (save OOF predictions to ./artifacts/).
+- Build a different model family (save OOF to ./artifacts/ for future stacking).
+- Stack existing OOF artifacts into a meta-learner + calibrate probabilities.
+- Multiple model + stacking tasks can appear in the same round.
+- Diverse weak models stacked > one strong model tuned heavily.
+
+## Guidelines
+- Start with 5-8 focused tasks per round.
+- Order by priority: baseline + valid submission FIRST, then improvements.
+- After seeing results, revise: mark done, add new, remove irrelevant, reorder.
+- Always ensure at least one task produces a valid submission file.
+- When budget is low, trim to essentials.
 
 Task description:
 {competition_description}
@@ -51,6 +53,7 @@ class TodoPlanningAgent:
         competition: Any,
         todo: TodoList,
         tracer: Optional[PromptTracer] = None,
+        tracker: Optional[TokenTracker] = None,
     ) -> None:
         self.cfg = cfg
         self.competition = competition
@@ -61,7 +64,7 @@ class TodoPlanningAgent:
         self.replan_interval = cfg.replan_interval
 
         llm_cfg = cfg.planning_llm
-        self.llm = PlanningLLM(llm_cfg)
+        self.llm = PlanningLLM(llm_cfg, tracker=tracker)
 
         desc = getattr(competition, "description", "") or ""
         preview = competition.get_data_preview() if hasattr(competition, "get_data_preview") else ""

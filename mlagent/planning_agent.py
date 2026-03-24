@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from mlagent.config import AgentConfig
 from mlagent.llm import PlanningLLM
-from mlagent.utils import PromptTracer
+from mlagent.utils import PromptTracer, TokenTracker
 
 logger = logging.getLogger(__name__)
 
@@ -16,22 +16,38 @@ logger = logging.getLogger(__name__)
 def _planning_system(competition_description: str, data_preview: str, metric_hint: str) -> str:
     return f"""You are an expert ML competition strategist.
 
-Your responsibilities:
-1. Analyze the competition to understand domain, data modality, metric, and key challenges.
-2. Create a multi-round plan with clear progression (baseline -> improvements -> advanced).
-3. Decide strategy based on results: exploit (tune what works), explore (try new approaches),
-   or debug (fix issues).
-4. Adjust your plan based on what actually happened in each round.
+The coding agent works autonomously each round: it has many steps and can build multiple
+models, do stacking, and calibration all within a single round. Your job is to tell it
+WHAT to achieve, and HOW. The agent handles debugging and error recovery
+on its own.
 
-Planning guidelines:
-- Round 1: always start with a fast, simple baseline that produces a valid submission.
-- Early rounds: try diverse approaches to find what works best for this data.
-- Later rounds: refine the best approach — tune hyperparameters, improve features,
-  consider ensembling multiple models.
-- If a round failed or timed out, suggest simplifying in the next round.
-- Be specific about what model/approach to use, but adaptable to results.
+## How to Plan Each Round
+- Each round, give the coding agent a clear goal with 2-4 concrete tasks.
+- The agent can accomplish multiple things per round (e.g. build 2 models + stack them).
+- Focus on what models/features to try, not on debugging or error handling.
+- If last round failed, suggest a simpler approach — but trust the agent to handle bugs.
+
+## Recommended Progression Across Rounds
+- Early rounds: build diverse base models. For each model, tell the agent to save
+  K-fold OOF (out-of-fold) train predictions and test predictions to ./artifacts/ as .npy.
+  A single round can include multiple diverse models if there are enough steps.
+- Later rounds: once 3+ diverse OOF sets exist in ./artifacts/, tell the agent to build
+  a stacking meta-learner (train on stacked OOF features) and calibrate probabilities.
+  Stacking + calibration can be done in the same round as building new base models.
+- Final rounds: refine the best approach. Small tuning, not major new experiments.
+
+## Model Combination (Stacking)
+- Diverse weak models stacked together outperform a single strong model tuned heavily.
+- OOF protocol: K-fold cross-validation → save oof_train.npy and test_preds.npy per model.
+- Stacking: load OOF artifacts, stack as columns, train a meta-learner (LR or XGBoost).
+- Calibration: CalibratedClassifierCV (isotonic) on the meta-model improves log-loss.
+- Select diverse OOF sources (e.g. linear, NB, tree, neural) — avoid near-duplicates.
+
+## Key Principles
 - Each round MUST produce a valid submission file.
-- When budget is running low, focus on refining the best approach rather than exploring.
+- When budget is low, refine best known approach rather than exploring.
+- If a round timed out, suggest simpler models/fewer features next round.
+- Be specific about models and features, but let the agent decide execution order.
 
 Task description:
 {competition_description}
@@ -54,6 +70,7 @@ class PlanningAgent:
         cfg: AgentConfig,
         competition: Any,
         tracer: Optional[PromptTracer] = None,
+        tracker: Optional[TokenTracker] = None,
     ) -> None:
         self.cfg = cfg
         self.competition = competition
@@ -64,7 +81,7 @@ class PlanningAgent:
         llm_cfg = cfg.planning_llm
         if not llm_cfg.keep_history:
             logger.warning("planning_llm.keep_history should be true for long-term memory")
-        self.llm = PlanningLLM(llm_cfg)
+        self.llm = PlanningLLM(llm_cfg, tracker=tracker)
 
         desc = getattr(competition, "description", "") or ""
         preview = competition.get_data_preview() if hasattr(competition, "get_data_preview") else ""

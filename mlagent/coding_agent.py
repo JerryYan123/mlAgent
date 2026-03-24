@@ -10,7 +10,7 @@ from typing import Any, Optional
 from mlagent.config import LLMConfig
 from mlagent.jupyter_executor import ExecutionResult, JupyterExecutor
 from mlagent.llm import ToolCallingLLM
-from mlagent.utils import PromptTracer
+from mlagent.utils import PromptTracer, TokenTracker
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,25 @@ def build_tools(submission_name: str) -> list[dict[str, Any]]:
     ]
 
 
+def _discover_artifacts(work_dir: Path) -> str:
+    """Scan ./artifacts/ for saved OOF predictions from prior rounds."""
+    art_dir = work_dir / "artifacts"
+    if not art_dir.exists():
+        return ""
+    files = sorted(art_dir.glob("*.npy"))
+    if not files:
+        return ""
+    lines = ["## Available Artifacts (from previous rounds)"]
+    for f in files:
+        size_kb = f.stat().st_size / 1024
+        lines.append(f"- {f.name} ({size_kb:.0f} KB)")
+    lines.append(
+        "→ You can load these with np.load() for stacking. "
+        "If you have 3+ diverse OOF sets, consider building a stacking meta-learner."
+    )
+    return "\n".join(lines)
+
+
 def _coding_system(plan: str, competition: Any, work_dir: Path, submission_name: str) -> str:
     desc = getattr(competition, "description", "")[:12000]
     return f"""You are the coding agent. Work in the Jupyter kernel (folder: {work_dir}).
@@ -104,13 +123,41 @@ You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, 
 ## Bug Handling
 - If a cell errors, read the traceback carefully and fix the specific issue.
 - Use edit_cell to make small fixes to a previous cell instead of rewriting from scratch.
-- If the same error keeps recurring, simplify your approach.
+- If the same error keeps recurring, simplify your approach — use a simpler model or
+  fewer features rather than retrying the same failing code.
 
 ## Iteration Strategy
 - After getting a working model, try variations: regularization strength, learning rate,
   feature count, number of folds, different algorithms.
 - Keep changes small and measurable — change one thing at a time when tuning.
 - Always print your validation metric so you can track improvements.
+- If stuck at the same score for 3+ consecutive steps, try a fundamentally different
+  approach (different model family, different features) rather than more tuning.
+
+## Artifact Protocol (OOF for Stacking)
+- After training each model with K-fold cross-validation, save the out-of-fold predictions:
+  import os, numpy as np
+  os.makedirs("./artifacts", exist_ok=True)
+  np.save("./artifacts/<model_name>_oof_train.npy", oof_train_preds)
+  np.save("./artifacts/<model_name>_oof_test.npy", test_preds)
+- Save artifacts IMMEDIATELY after computing them — if a later step times out,
+  earlier artifacts are preserved for future stacking.
+- For stacking: load all saved OOF artifacts, stack as columns, train a meta-learner.
+
+## API Compatibility
+- scikit-learn >=1.5: LogisticRegression does NOT accept `multi_class` parameter (removed).
+  Always use solver='lbfgs' for multiclass. CalibratedClassifierCV uses `estimator=`
+  not `base_estimator=`.
+- lightgbm >=4.0: Do NOT pass `early_stopping_rounds` or `verbose` to fit().
+  Use callbacks: lgb.early_stopping(50), lgb.log_evaluation(100).
+- xgboost >=2.0: Use `early_stopping_rounds` in constructor, not fit().
+- scipy: Use `from scipy import sparse` then `sparse.hstack(...)`.
+
+## Self-Assessment
+- After each experiment, evaluate: did the validation metric improve? If not, why?
+- Before trying something new, check if you have saved OOF artifacts for stacking.
+- If the plan says to stack but you have fewer than 3 OOF sets, build more diverse
+  base models first.
 
 ## Rules
 - Use relative paths; data is under input/
@@ -125,10 +172,12 @@ class CodingAgent:
         coding_cfg: LLMConfig,
         tracer: Optional[PromptTracer] = None,
         agent_idx: int = 0,
+        tracker: Optional[TokenTracker] = None,
     ) -> None:
         self.coding_cfg = coding_cfg
         self.tracer = tracer
         self.agent_idx = agent_idx
+        self.tracker = tracker
         self._tag = f"[Agent {agent_idx}]"
 
     def run_round(
@@ -140,12 +189,16 @@ class CodingAgent:
         submission_name: str,
         max_steps: int,
     ) -> str:
-        llm = ToolCallingLLM(self.coding_cfg)
+        llm = ToolCallingLLM(self.coding_cfg, tracker=self.tracker)
         llm.set_system(_coding_system(plan, competition, work_dir, submission_name))
-        llm.append_user(
+        artifacts_hint = _discover_artifacts(work_dir)
+        start_msg = (
             "Start the round. Use tools to implement the plan. "
             f"You have {max_steps} steps available."
         )
+        if artifacts_hint:
+            start_msg += f"\n\n{artifacts_hint}"
+        llm.append_user(start_msg)
         tools = build_tools(submission_name)
 
         for step in range(max_steps):

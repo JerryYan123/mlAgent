@@ -193,3 +193,39 @@ def extract_xml_tag(text: str, tag: str) -> str | None:
     pat = rf"<{tag}>\s*(.*?)\s*</{tag}>"
     m = re.search(pat, text, re.DOTALL | re.IGNORECASE)
     return m.group(1).strip() if m else None
+
+
+class TokenTracker:
+    """Accumulates token usage across LLM calls. Thread-safe for parallel agents."""
+
+    _COST_PER_1M: dict[str, tuple[float, float]] = {
+        "gpt-5.4-mini": (0.40, 1.60),
+        "gpt-4o": (2.50, 10.00),
+        "gpt-4o-mini": (0.15, 0.60),
+        "gpt-5.1-codex-mini": (1.50, 6.00),
+        "o3-mini": (1.10, 4.40),
+    }
+
+    def __init__(self) -> None:
+        import threading
+        self._lock = threading.Lock()
+        self.input = 0
+        self.output = 0
+
+    def add(self, prompt_tokens: int, completion_tokens: int) -> None:
+        with self._lock:
+            self.input += prompt_tokens
+            self.output += completion_tokens
+
+    def snapshot(self) -> tuple[int, int]:
+        """Return (input, output) totals so far — use for computing deltas."""
+        with self._lock:
+            return self.input, self.output
+
+    @classmethod
+    def estimate_cost(cls, input_tokens: int, output_tokens: int, model: str) -> float | None:
+        key = model.lower()
+        for name, (inp_cost, out_cost) in cls._COST_PER_1M.items():
+            if name in key:
+                return (input_tokens * inp_cost + output_tokens * out_cost) / 1_000_000
+        return None

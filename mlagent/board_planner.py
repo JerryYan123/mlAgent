@@ -1,4 +1,4 @@
-"""Board-aware planning agent with inner-loop replanning."""
+"""Board-aware planning agent using ExperimentMap."""
 
 from __future__ import annotations
 
@@ -6,35 +6,59 @@ import logging
 from typing import Any, Optional
 
 from mlagent.config import AgentConfig
-from mlagent.experiment_board import ExperimentBoard
+from mlagent.experiment_board import ExperimentMap
 from mlagent.llm import PlanningLLM
-from mlagent.utils import PromptTracer
+from mlagent.utils import PromptTracer, TokenTracker
 
 logger = logging.getLogger(__name__)
 
 
 def _board_system(competition_description: str, data_preview: str, metric_hint: str) -> str:
-    return f"""You are an expert ML competition strategist with access to an Experiment Board.
+    return f"""You are an expert ML competition strategist. You maintain an Experiment Map —
+an append-only, branch-grouped record of every experiment and strategic note accumulated
+across all rounds. Read it carefully before every plan.
 
-The board tracks everything discovered so far: data insights, experiments run, scores,
-hypotheses, and strategic decisions. You MUST read the board before every plan and use
-it to avoid repeating work and to build on what works.
+You can annotate the map with tagged lines in your response:
+  [MAP:branch_name] your concise note
+Use these to sketch planned directions, mark promising/dead-end branches, or leave
+strategic guidance for future rounds. Keep annotations brief (1 line each).
 
-You can add entries to the board by including tagged lines in your response:
-  [BOARD:insight] observation about data
-  [BOARD:hypothesis] idea to test and why
-  [BOARD:decision] strategic choice you're making
-  [BOARD:finding] conclusion drawn from results
+The coding agent works autonomously each round with many steps. It can build multiple
+models, do stacking, and calibrate — all within one round. Your job is to set the
+round-level goal and overall strategy, not micro-manage individual steps.
 
-Guidelines:
-- Round 1: populate the board with initial hypotheses based on the competition/data.
-- Always check what experiments have already been run before suggesting new ones.
-- Exploit what works: if a model scored well, suggest tuning it rather than starting over.
-- Explore strategically: if scores are low, try a fundamentally different approach.
-- Each plan MUST lead to a valid submission file.
-- When budget is low, focus on the best known approach.
-- You will be called multiple times within a round (inner-loop replanning).
-  When you see mid-round results, give focused adjustments, not full rewrites.
+## Round 1 — Initial Strategy Map
+Round 1 is special: the map is empty and you must build the initial blueprint.
+1. Analyze the competition task, data characteristics, and evaluation metric.
+2. Sketch 3-5 approach branches you plan to explore across the entire experiment,
+   using [MAP:branch] tags. For example:
+     [MAP:TF-IDF + Linear] baseline with char/word n-grams, fast to iterate
+     [MAP:Tree Ensembles] LightGBM/XGBoost on count features
+     [MAP:Stacking] meta-learner after 3+ diverse OOF sets
+   These branches form the initial "map" — later rounds will expand and refine it.
+3. Then give the coding agent 2-4 concrete goals for round 1 (typically: explore data,
+   build 1-2 diverse baselines, save OOF predictions).
+
+## Later Rounds — Replan Based on Results
+- Review the Experiment Map: what worked, what didn't, what's untried.
+- If a direction failed or stalled, annotate it and pivot:
+    [MAP:Tree Ensembles] diminishing returns, deprioritize
+- If a direction is promising, deepen it or fork a new sub-branch:
+    [MAP:TF-IDF + Linear] best so far, try sublinear TF + bigrams
+- Add new branches if new ideas emerge from results.
+- Give the coding agent 2-4 concrete goals for the current round.
+
+## Strategy Progression
+- Early rounds: diverse base models, each saving OOF predictions to ./artifacts/.
+- Mid rounds: tune top performers, try different feature engineering.
+- Late rounds: stacking (meta-learner on OOF features) + probability calibration.
+- Each round MUST produce a valid submission.
+- When budget is low, refine best known approach rather than exploring.
+
+## Guidelines
+- Don't repeat experiments already recorded in the map.
+- Focus on WHAT to do, not HOW (the coding agent handles implementation).
+- If scores are stuck for 2+ rounds, pivot to a fundamentally different approach.
 
 Task description:
 {competition_description}
@@ -50,84 +74,63 @@ class BoardPlanningAgent:
         self,
         cfg: AgentConfig,
         competition: Any,
-        board: ExperimentBoard,
+        exp_map: ExperimentMap,
         tracer: Optional[PromptTracer] = None,
+        tracker: Optional[TokenTracker] = None,
     ) -> None:
         self.cfg = cfg
         self.competition = competition
-        self.board = board
+        self.exp_map = exp_map
         self.tracer = tracer
         self.max_rounds = cfg.max_rounds
         self.max_steps = cfg.max_steps_per_round
-        self.replan_interval = cfg.replan_interval
 
         llm_cfg = cfg.planning_llm
-        self.llm = PlanningLLM(llm_cfg)
+        self.llm = PlanningLLM(llm_cfg, tracker=tracker)
 
         desc = getattr(competition, "description", "") or ""
         preview = competition.get_data_preview() if hasattr(competition, "get_data_preview") else ""
         lower = getattr(competition, "is_lower_better", False)
         metric_hint = f"lower is better: {lower}" if lower else "higher is better"
+        self.exp_map.is_lower_better = bool(lower)
 
         sys_prompt = _board_system(desc, preview, metric_hint)
         self.llm.messages = [{"role": "system", "content": sys_prompt}]
 
     def plan(self, round_num: int, last_summary: Optional[str]) -> str:
-        """Generate a plan for the start of a round."""
         budget = (
             f"[Budget] Round {round_num}/{self.max_rounds} "
             f"({self.max_rounds - round_num} remaining), "
-            f"{self.max_steps} coding steps, replanning every {self.replan_interval} steps."
+            f"{self.max_steps} coding steps."
         )
-        board_str = self.board.to_string()
+        map_str = self.exp_map.to_string()
 
         if round_num == 1:
             prompt = (
                 f"{budget}\n\n"
-                f"## Current Board\n{board_str}\n\n"
-                f"Round 1: no prior results.\n\n"
-                f"1. Populate the board with initial insights and hypotheses about this "
-                f"competition (use [BOARD:insight] and [BOARD:hypothesis] tags).\n"
-                f"2. Provide a concrete plan for the coding agent.\n\n"
-                f"The coder will pause every {self.replan_interval} steps for your feedback."
+                f"## Experiment Map\n{map_str}\n\n"
+                f"This is round 1 — the map is empty.\n\n"
+                f"First, build the initial strategy map: analyze the task and sketch "
+                f"3-5 approach branches using [MAP:branch] tags. These branches form "
+                f"the blueprint for the entire experiment.\n\n"
+                f"Then, provide a concrete plan for the coding agent for this round "
+                f"(typically: explore data, build 1-2 diverse baselines, save OOF)."
             )
         else:
             prompt = (
                 f"{budget}\n\n"
-                f"## Current Board\n{board_str}\n\n"
-                f"Results from round {round_num - 1}:\n{last_summary or '(none)'}\n\n"
-                f"Review the board, add any new insights or decisions, "
-                f"then provide the plan for round {round_num}."
+                f"## Experiment Map\n{map_str}\n\n"
+                f"Summary from round {round_num - 1}:\n{last_summary or '(none)'}\n\n"
+                f"Review the map. Update branch annotations if needed — mark dead ends, "
+                f"highlight promising directions, add new branches if new ideas emerge.\n\n"
+                f"Then provide the plan for round {round_num}."
             )
 
         self.llm.append_user(prompt)
         reply = self.llm.chat()
 
-        self.board.update_from_llm(reply, round_num)
+        self.exp_map.update_from_planner(reply, round_num)
 
         if self.tracer:
             self.tracer.write(f"board_plan_r{round_num}", prompt, reply)
-        return reply
-
-    def replan(self, round_num: int, step: int, mid_summary: str) -> str:
-        """Mid-round replanning: coder paused, planner adjusts."""
-        board_str = self.board.to_string()
-        remaining = self.max_steps - step
-        prompt = (
-            f"[Mid-round update] Round {round_num}, step {step}/{self.max_steps} "
-            f"({remaining} steps remaining).\n\n"
-            f"## Current Board\n{board_str}\n\n"
-            f"## Coding progress so far\n{mid_summary}\n\n"
-            f"Update the board with any new findings (use [BOARD:...] tags). "
-            f"Then give focused next steps for the remaining {remaining} steps. "
-            f"Keep it concise — this is a mid-round adjustment, not a full replan."
-        )
-
-        self.llm.append_user(prompt)
-        reply = self.llm.chat()
-
-        self.board.update_from_llm(reply, round_num, step)
-
-        if self.tracer:
-            self.tracer.write(f"board_replan_r{round_num}_s{step}", prompt, reply)
         return reply
