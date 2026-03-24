@@ -1,44 +1,55 @@
 # mlAgent — Planning + Coding (MLE-bench)
 
-双智能体（Planning + Coding），数据与评分走 **mle-bench**。用法与 **myAgent** 相同：**进目录 → 激活 conda → `python` / `nohup python ...`**，主入口只有 **`scripts/run.py`**。
+双智能体（Planning + Coding），支持 1\~N 个并行 Coding Agent。数据与评分走 **mle-bench**。
+
+主入口：**`scripts/run.py`**（`--config` 默认 `configs/default.yaml`，可省略）。
 
 ---
 
-## Current（云上）
+## 日常运行
 
-与 myAgent README 同结构：
+本地和云命令一样，进目录 → 激活 conda → nohup 跑。
+
+**本地：**
 
 ```bash
-## run
+conda activate mlagent
+cd ~/Desktop/ai4mle-research/mlAgent
+nohup python -u scripts/run.py > mlagent_run.log 2>&1 &
+tail -f mlagent_run.log
+```
+
+**云上：**
+
+```bash
 ssh weiweis@pitt.lti.cs.cmu.edu
 tmux new -s mlagent
 cd /usr1/data/weiwei/jerry/ai4mle-research/mlAgent
 actmlagent
 
-export OPENAI_API_KEY=...   # 或写在 ~/.bashrc
-
-nohup python -u scripts/run.py --config configs/default.yaml --competition spooky-author-identification > mlagent_run.log 2>&1 &
-
+nohup python -u scripts/run.py --competition spooky-author-identification > mlagent_run.log 2>&1 &
 tail -f mlagent_run.log
+```
 
-# kill
+**覆盖参数示例：**
+
+```bash
+nohup python -u scripts/run.py max_rounds=1 max_steps_per_round=6 > mlagent_run.log 2>&1 &
+nohup python -u scripts/run.py num_coding_agents=2 > mlagent_run.log 2>&1 &
+```
+
+**停止：**
+
+```bash
 pkill -f "scripts/run.py"
 ps aux | grep run.py
 ```
-
-**`actmlagent`**：与 **`actmyagent`** 一样，在 `~/.bashrc` 里配 alias，例如：
-
-`alias actmlagent='source ~/miniconda3/etc/profile.d/conda.sh && conda activate mlagent'`
-
-（conda 路径按机器改。）
 
 ---
 
 ## 第一次：环境（本机 / 服务器各执行一次）
 
-**一行只敲一条命令**，不要把多行和中文注释粘成一行。
-
-目录需为 **`ai4mle-research/mlAgent`**，且上一级有 **`mle-bench`**（与 myAgent 同级）。
+一行只敲一条命令。目录需为 `ai4mle-research/mlAgent`，上一级有 `mle-bench`。
 
 ```bash
 cd /path/to/ai4mle-research/mlAgent
@@ -48,25 +59,23 @@ conda env create -f environment.yml
 conda activate mlagent
 pip install -e .
 pip install -e ../mle-bench
-
-export OPENAI_API_KEY=sk-...
 ```
 
-- 没有 `environment.yml`：先 **`git pull`**（单独仓库则拉 `mlAgent` 的 `main`）。
-- **`git pull` 被 `cache/cache.db` 挡住**：`git restore cache/cache.db` 或删掉该文件再 `git pull`。
+**OPENAI\_API\_KEY 一次性配好（之后不用再 export）：**
 
----
+- 本地 Mac (zsh)：在 `~/.zshrc` 末尾加 `export OPENAI_API_KEY="sk-..."`，然后 `source ~/.zshrc`
+- 云上 (bash)：在 `~/.bashrc` 末尾加 `export OPENAI_API_KEY="sk-..."`，然后 `source ~/.bashrc`
 
-## 本地日常
+**`actmlagent` alias（云上 `~/.bashrc`）：**
 
 ```bash
-conda activate mlagent
-cd ~/Desktop/ai4mle-research/mlAgent
-export OPENAI_API_KEY=...
-python -u scripts/run.py --config configs/default.yaml
+alias actmlagent='source ~/miniconda3/etc/profile.d/conda.sh && conda activate mlagent'
 ```
 
-覆盖示例：`python -u scripts/run.py max_rounds=1 max_steps_per_round=6`
+**常见问题：**
+
+- 没有 `environment.yml`：先 `git pull`。
+- `git pull` 被 `cache/cache.db` 挡住：`git restore cache/cache.db` 再 `git pull`。
 
 ---
 
@@ -78,7 +87,7 @@ ssh weiweis@pitt.lti.cs.cmu.edu 'cd /usr1/data/weiwei/jerry/ai4mle-research/mlAg
 
 ---
 
-## pull data（与 myAgent 相同）
+## pull data
 
 ```bash
 bash scripts/pull_run.sh pull
@@ -88,7 +97,7 @@ bash scripts/pull_run.sh clear
 
 ---
 
-## 项目结构（简要）
+## 项目结构
 
 ```
 mlagent/              # Python 包
