@@ -1,4 +1,4 @@
-"""ExperimentBoard, ExperimentMap, and TodoList — shared state structures."""
+"""ExperimentBoard and TodoList — shared state structures for planning strategies."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
-# ExperimentMap — tree-structured experiment record for board_replan v2
+# ExperimentBoard — branch-grouped experiment record for board_replan
 # ---------------------------------------------------------------------------
 
 @dataclass
-class MapEntry:
+class BoardEntry:
     branch: str
     content: str
     score: float | None = None
@@ -24,16 +24,16 @@ class MapEntry:
     timestamp: float = field(default_factory=time.time)
 
 
-class ExperimentMap:
-    """Tree-structured experiment record grouped by approach branch.
+class ExperimentBoard:
+    """Branch-grouped, append-only experiment record.
 
     - Coding agent appends experiment results via log_to_board tool.
-    - Planner appends strategic notes via [MAP:branch] tags.
-    - Append-only: nothing is ever deleted.
+    - Planner appends strategic notes via [BOARD:branch] tags.
+    - Nothing is ever deleted.
     """
 
     def __init__(self, is_lower_better: bool = True) -> None:
-        self.entries: list[MapEntry] = []
+        self.entries: list[BoardEntry] = []
         self.is_lower_better = is_lower_better
 
     def add_result(
@@ -46,19 +46,19 @@ class ExperimentMap:
     ) -> None:
         content = f"{experiment}: {result}" if result else experiment
         self.entries.append(
-            MapEntry(branch=branch, content=content, score=score,
-                     entry_type="experiment", round_num=round_num)
+            BoardEntry(branch=branch, content=content, score=score,
+                       entry_type="experiment", round_num=round_num)
         )
 
     def add_note(
         self, branch: str, note: str, round_num: int | None = None
     ) -> None:
         self.entries.append(
-            MapEntry(branch=branch, content=note, score=None,
-                     entry_type="note", round_num=round_num)
+            BoardEntry(branch=branch, content=note, score=None,
+                       entry_type="note", round_num=round_num)
         )
 
-    def _best_score(self, entries: list[MapEntry]) -> MapEntry | None:
+    def _best_score(self, entries: list[BoardEntry]) -> BoardEntry | None:
         scored = [e for e in entries if e.score is not None]
         if not scored:
             return None
@@ -69,7 +69,7 @@ class ExperimentMap:
     def to_string(self) -> str:
         if not self.entries:
             return "(empty — no experiments recorded yet)"
-        branches: dict[str, list[MapEntry]] = {}
+        branches: dict[str, list[BoardEntry]] = {}
         for e in self.entries:
             branches.setdefault(e.branch, []).append(e)
 
@@ -116,60 +116,14 @@ class ExperimentMap:
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     @staticmethod
-    def parse_map_tags(text: str) -> list[tuple[str, str]]:
-        """Extract [MAP:branch] note lines from planner output."""
-        pattern = r"\[MAP:([^\]]+)\]\s*(.+)"
+    def parse_board_tags(text: str) -> list[tuple[str, str]]:
+        """Extract [BOARD:branch] note lines from planner output."""
+        pattern = r"\[BOARD:([^\]]+)\]\s*(.+)"
         return re.findall(pattern, text)
 
     def update_from_planner(self, text: str, round_num: int | None = None) -> None:
-        for branch, note in self.parse_map_tags(text):
+        for branch, note in self.parse_board_tags(text):
             self.add_note(branch.strip(), note.strip(), round_num)
-
-
-# ---------------------------------------------------------------------------
-# Legacy ExperimentBoard (kept for backward compatibility)
-# ---------------------------------------------------------------------------
-
-@dataclass
-class BoardEntry:
-    entry_type: str
-    content: str
-    round_num: int | None = None
-    step: int | None = None
-    timestamp: float = field(default_factory=time.time)
-
-
-class ExperimentBoard:
-    """Legacy flat board. Kept for old runs; new code uses ExperimentMap."""
-
-    def __init__(self) -> None:
-        self.entries: list[BoardEntry] = []
-
-    def add(self, entry_type: str, content: str,
-            round_num: int | None = None, step: int | None = None) -> None:
-        self.entries.append(BoardEntry(entry_type, content, round_num, step))
-
-    def to_string(self) -> str:
-        if not self.entries:
-            return "(empty board)"
-        lines: list[str] = []
-        for e in self.entries:
-            tag = e.entry_type.upper()
-            loc = ""
-            if e.round_num is not None:
-                loc = f" R{e.round_num}"
-                if e.step is not None:
-                    loc += f"/S{e.step}"
-            lines.append(f"[{tag}{loc}] {e.content}")
-        return "\n".join(lines)
-
-    def save(self, path: Path) -> None:
-        data = [
-            {"type": e.entry_type, "content": e.content,
-             "round": e.round_num, "step": e.step, "ts": e.timestamp}
-            for e in self.entries
-        ]
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

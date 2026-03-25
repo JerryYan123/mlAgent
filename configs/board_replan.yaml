@@ -1,6 +1,6 @@
-# Strategy: board_replan — Experiment Board + inner-loop replanning
-# Planner maintains a persistent board of insights/experiments/hypotheses.
-# Every replan_interval steps, coder pauses and planner re-engages with updated board.
+# Strategy: board_replan — Experiment Board + per-round replanning
+# Planner sketches a branch-grouped strategy board in round 1, then revises each round.
+# Coding agent logs results to the board via log_to_board tool; planner reads board to replan.
 competition_id: spooky-author-identification
 working_dir: ./workspace
 submission_file: submission.csv

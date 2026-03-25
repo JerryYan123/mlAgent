@@ -31,11 +31,28 @@ nohup python -u scripts/run.py --competition spooky-author-identification > mlag
 tail -f mlagent_run.log
 ```
 
+**三种 planning 策略：**
+
+默认跑 `baseline`（`configs/default.yaml`）。用 `--config` 切换：
+
+```bash
+# baseline（默认，可省略 --config）
+nohup python -u scripts/run.py > mlagent_run.log 2>&1 &
+
+# Experiment Board：planner 维护 branch 实验板，coder 用 log_to_board 记录实验
+nohup python -u scripts/run.py --config configs/board_replan.yaml > map_run.log 2>&1 &
+
+# Codex Todo：planner 生成 todo list，coder 按序执行，定期 revise
+nohup python -u scripts/run.py --config configs/codex_todo.yaml > todo_run.log 2>&1 &
+```
+
+三个同时跑（日志分开）即可对比。
+
 **覆盖参数示例：**
 
 ```bash
 nohup python -u scripts/run.py max_rounds=1 max_steps_per_round=6 > mlagent_run.log 2>&1 &
-nohup python -u scripts/run.py num_coding_agents=2 > mlagent_run.log 2>&1 &
+nohup python -u scripts/run.py --config configs/board_replan.yaml max_rounds=5 > map_run.log 2>&1 &
 ```
 
 **停止：**
@@ -101,7 +118,10 @@ bash scripts/pull_run.sh clear
 
 ```
 mlagent/              # Python 包
-configs/              # default.yaml
+configs/              # yaml 配置
+  default.yaml        #   baseline 策略（默认）
+  board_replan.yaml   #   Experiment Board 策略
+  codex_todo.yaml     #   Codex Todo 策略
 scripts/run.py        # 唯一入口
 environment.yml       # conda 环境名 mlagent
 workspace/            # 运行产物，gitignore

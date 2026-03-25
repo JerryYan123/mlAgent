@@ -89,7 +89,7 @@ LOG_TO_BOARD_TOOL = {
     "function": {
         "name": "log_to_board",
         "description": (
-            "Record an experiment result to the shared Experiment Map. "
+            "Record an experiment result to the shared Experiment Board. "
             "Call after finishing a model run or getting a meaningful result. "
             "This does NOT count as a step."
         ),
@@ -121,12 +121,10 @@ LOG_TO_BOARD_TOOL = {
 
 def _handle_log_to_board(
     args: dict[str, Any],
-    exp_map: Any,
+    board: Any,
     round_num: int,
 ) -> str:
     """Process a log_to_board tool call. Returns JSON response."""
-    from mlagent.experiment_board import ExperimentMap
-
     branch = args.get("branch", "unknown")
     experiment = args.get("experiment", "")
     result = args.get("result", "")
@@ -137,9 +135,9 @@ def _handle_log_to_board(
         except (ValueError, TypeError):
             score = None
 
-    exp_map.add_result(branch, experiment, result, score=score, round_num=round_num)
+    board.add_result(branch, experiment, result, score=score, round_num=round_num)
 
-    branch_status = exp_map.branch_string(branch)
+    branch_status = board.branch_string(branch)
     return json.dumps({
         "logged": True,
         "branch": branch,
@@ -158,7 +156,7 @@ def _run_coding_step(
     max_steps: int,
     tracer: PromptTracer | None,
     tag: str,
-    exp_map: Any | None = None,
+    board: Any | None = None,
     round_num: int = 0,
 ) -> list[str]:
     """Execute one tool-calling step. Returns list of tool names called."""
@@ -197,10 +195,10 @@ def _run_coding_step(
         tool_names.append(tc.name)
         goal = tc.arguments.get("goal", "")[:80] if isinstance(tc.arguments, dict) else ""
 
-        if tc.name == "log_to_board" and exp_map is not None:
+        if tc.name == "log_to_board" and board is not None:
             branch = tc.arguments.get("branch", "?") if isinstance(tc.arguments, dict) else "?"
             logger.info("%s Step %d/%d — log_to_board: %s", tag, step + 1, max_steps, branch)
-            out = _handle_log_to_board(tc.arguments, exp_map, round_num)
+            out = _handle_log_to_board(tc.arguments, board, round_num)
         else:
             logger.info("%s Step %d/%d — %s: %s", tag, step + 1, max_steps, tc.name, goal)
             out = coder._dispatch_tool(tc.name, tc.arguments, jupyter, work_dir, submission_name)
@@ -234,48 +232,48 @@ def _board_coding_system(
     competition: Any,
     work_dir: Path,
     submission_name: str,
-    map_str: str,
+    board_str: str,
 ) -> str:
     base = _coding_system(plan, competition, work_dir, submission_name)
     return f"""{base}
 
-## Experiment Map
-The following is the current state of the shared Experiment Map — all experiments
+## Experiment Board
+The following is the current state of the shared Experiment Board — all experiments
 recorded so far. Review it before logging new results to avoid duplicate entries.
 
-{map_str}
+{board_str}
 
 ## Logging Results
 After each meaningful experiment (model trained, score computed), record it with
 the log_to_board tool. Include: branch (approach family), experiment (what you tried),
 result (outcome), and score (validation metric, if computed).
 - Only log completed experiments with concrete outcomes.
-- Check the map above — don't log duplicates or near-identical entries.
+- Check the board above — don't log duplicates or near-identical entries.
 - log_to_board does NOT count as a step; use it freely whenever you have results."""
 
 
 def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
     from mlagent.board_planner import BoardPlanningAgent
-    from mlagent.experiment_board import ExperimentMap
+    from mlagent.experiment_board import ExperimentBoard
 
     setup_logging()
     _ensure_cuda_visible(config)
     run_dir = _setup_run_dir(config, "board")
     tracer = PromptTracer(run_dir / "debug_prompts", enabled=bool(config.trace_prompts))
     competition = load_competition(config.competition_id)
-    exp_map = ExperimentMap()
+    board = ExperimentBoard()
 
     tracker = TokenTracker()
 
     logger.info("=" * 60)
-    logger.info("Strategy: BOARD_REPLAN (v2 — ExperimentMap)")
+    logger.info("Strategy: BOARD_REPLAN")
     logger.info("Loading competition: %s", config.competition_id)
     logger.info(
         "Config: %d round(s), %d step(s)/round",
         config.max_rounds, config.max_steps_per_round,
     )
 
-    planner = BoardPlanningAgent(config, competition, exp_map, tracer=tracer, tracker=tracker)
+    planner = BoardPlanningAgent(config, competition, board, tracer=tracer, tracker=tracker)
     exp_log = ExperimentLog(run_dir / "experiment_log.json")
 
     last_summary: Optional[str] = None
@@ -298,7 +296,7 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
 
             plan = planner.plan(rnd, last_summary)
             snap_after_plan = tracker.snapshot()
-            logger.info("Plan generated (map has %d entries)", len(exp_map.entries))
+            logger.info("Plan generated (board has %d entries)", len(board.entries))
 
             agent_dir.mkdir(parents=True, exist_ok=True)
             jupyter = JupyterExecutor(
@@ -311,8 +309,8 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
             tag = "[Agent 0]"
 
             llm = ToolCallingLLM(config.coding_llm, tracker=tracker)
-            map_str = exp_map.to_string()
-            llm.set_system(_board_coding_system(plan, competition, agent_dir, config.submission_file, map_str))
+            board_str = board.to_string()
+            llm.set_system(_board_coding_system(plan, competition, agent_dir, config.submission_file, board_str))
             artifacts_hint = _discover_artifacts(agent_dir)
             start_msg = (
                 f"Start the round. Use tools to implement the plan. "
@@ -333,7 +331,7 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
                     tool_names = _run_coding_step(
                         llm, tools, coder, jupyter, agent_dir, config.submission_file,
                         step, max_steps, at, tag,
-                        exp_map=exp_map, round_num=rnd,
+                        board=board, round_num=rnd,
                     )
                     has_real_tool = any(n != "log_to_board" for n in tool_names)
                     if has_real_tool or not tool_names:
@@ -347,9 +345,9 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
                 )
                 summary = llm.chat_no_tools() or "No summary generated."
 
-                if not exp_map.has_experiments_from_round(rnd):
+                if not board.has_experiments_from_round(rnd):
                     logger.info("%s No log_to_board calls this round — extracting from summary", tag)
-                    exp_map.add_result(
+                    board.add_result(
                         branch="auto",
                         experiment=f"Round {rnd} (auto-extracted)",
                         result=summary[:500],
@@ -378,12 +376,12 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
             )
             exp_log.log_round(rnd, plan[:1000], last_summary, grade, extra={
                 "strategy": "board_replan",
-                "map_entries": len(exp_map.entries),
+                "board_entries": len(board.entries),
                 "plan_tokens": {"input": plan_in, "output": plan_out},
                 "code_tokens": {"input": code_in, "output": code_out},
                 "estimated_cost_usd": round_cost,
             })
-            exp_map.save(run_dir / "experiment_map.json")
+            board.save(run_dir / "experiment_board.json")
 
             elapsed_min = (time.time() - start) / 60
             logger.info("Round %d done (%.1f min total). Best score: %s", rnd, elapsed_min, best_score)
@@ -392,7 +390,7 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
         best_sub = run_dir / "best_submission.csv"
         if best_sub.exists():
             shutil.copy(best_sub, run_dir / config.submission_file)
-        exp_map.save(run_dir / "experiment_map.json")
+        board.save(run_dir / "experiment_board.json")
 
     total_min = (time.time() - start) / 60
     logger.info("=" * 60)
