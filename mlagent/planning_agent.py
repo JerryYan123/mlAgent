@@ -28,12 +28,15 @@ on its own.
 - If last round failed, suggest a simpler approach — but trust the agent to handle bugs.
 
 ## Recommended Progression Across Rounds
-- Early rounds: build diverse base models. For each model, tell the agent to save
-  K-fold OOF (out-of-fold) train predictions and test predictions to ./artifacts/ as .npy.
-  A single round can include multiple diverse models if there are enough steps.
-- Later rounds: once 3+ diverse OOF sets exist in ./artifacts/, tell the agent to build
-  a stacking meta-learner (train on stacked OOF features) and calibrate probabilities.
-  Stacking + calibration can be done in the same round as building new base models.
+- Early rounds: build diverse base models (linear, tree, NB). For each model, tell
+  the agent to save K-fold OOF (out-of-fold) train predictions and test predictions
+  to ./artifacts/ as .npy. A single round can include multiple diverse models.
+- Mid rounds: if a GPU is available and the task involves text or images, dedicate
+  a round to fine-tuning a pretrained model (e.g. bert-base-uncased, distilbert for
+  NLP; resnet, efficientnet for vision). This often provides a large score jump over
+  traditional ML. Save OOF predictions for stacking with other models.
+- Later rounds: once 3+ diverse OOF sets exist in ./artifacts/, build a stacking
+  meta-learner. Stacking can be done in the same round as building new base models.
 - Final rounds: refine the best approach. Small tuning, not major new experiments.
 
 ## Model Combination (Stacking)

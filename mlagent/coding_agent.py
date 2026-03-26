@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 
@@ -100,15 +102,50 @@ def _discover_artifacts(work_dir: Path) -> str:
     return "\n".join(lines)
 
 
+def _gpu_hint(work_dir: Path) -> str:
+    """Detect available GPU and return a hint string for the coding agent."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return ""
+        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        visible_ids = set()
+        if cuda_visible:
+            visible_ids = {int(x.strip()) for x in cuda_visible.split(",") if x.strip().isdigit()}
+        lines = []
+        for line in result.stdout.strip().split("\n"):
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 4:
+                continue
+            idx = int(parts[0])
+            if visible_ids and idx not in visible_ids:
+                continue
+            name, total, used = parts[1], float(parts[2]), float(parts[3])
+            free = total - used
+            lines.append(f"  GPU {idx}: {name}, {free:.0f}MB free / {total:.0f}MB total")
+        if not lines:
+            return ""
+        return "GPU available:\n" + "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def _coding_system(plan: str, competition: Any, work_dir: Path, submission_name: str, metric_hint: str = "") -> str:
     desc = getattr(competition, "description", "")[:12000]
     metric_line = f"\nMetric: {metric_hint}\n" if metric_hint else ""
+    gpu_info = _gpu_hint(work_dir)
+    gpu_section = f"\n{gpu_info}\n" if gpu_info else ""
     return f"""You are the coding agent. Work in the Jupyter kernel (folder: {work_dir}).
 Data is under ./input/ (symlink to competition data). Write submission to ./{submission_name}.
 
 Competition description (excerpt):
 {desc}
-{metric_line}
+{metric_line}{gpu_section}
 Plan from planning agent:
 {plan}
 
@@ -134,6 +171,10 @@ You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, 
 - Always print your validation metric so you can track improvements.
 - If stuck at the same score for 3+ consecutive steps, try a fundamentally different
   approach (different model family, different features) rather than more tuning.
+- If a GPU is available, consider fine-tuning a pretrained transformer (e.g.
+  bert-base-uncased, distilbert, roberta-base for NLP tasks) — this might beats
+  traditional ML. Use HuggingFace transformers + a small learning rate
+  (2e-5), few epochs (2-4), and K-fold CV. Save OOF predictions for stacking.
 
 ## Artifact Protocol (OOF for Stacking)
 - After training each model with K-fold cross-validation, save the out-of-fold predictions:

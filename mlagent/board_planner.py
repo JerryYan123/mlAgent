@@ -50,7 +50,9 @@ Round 1 is special: the board is empty and you must build the initial blueprint.
 
 ## Strategy Progression
 - Early rounds: diverse base models, each saving OOF predictions to ./artifacts/.
-- Mid rounds: tune top performers, try different feature engineering.
+- Mid rounds: if GPU is available and the task involves text/images, plan a round for
+  fine-tuning a pretrained model (BERT, ResNet, etc.) — this often gives a large boost.
+  Also tune top traditional performers and try different feature engineering.
 - Late rounds: stacking (meta-learner on OOF features). Apply calibration only if
   the metric is probability-based (log-loss, Brier); skip it for ranking metrics (AUC).
 - Each round MUST produce a valid submission.
