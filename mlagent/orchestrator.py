@@ -202,7 +202,7 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                         logger.info("  ★ New best score: %s (agent %d)", best_score, i)
 
             summaries = [r or f"Agent {i} produced no summary." for i, r in enumerate(results)]
-            last_summary = format_parallel_summary(summaries, grades, best_score, rnd)
+            last_summary = format_parallel_summary(summaries, grades, best_score, rnd, is_lower_better=lower)
 
             combined_plan = "\n---\n".join(
                 f"Agent {i}: {plans[i][:500]}" for i in range(N)

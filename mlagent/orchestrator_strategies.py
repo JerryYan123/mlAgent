@@ -360,7 +360,8 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
             sub_path = agent_dir / config.submission_file
             nb_path = jupyter.get_notebook_path()
             best_score, grade = _grade_and_track_best(competition, sub_path, nb_path, run_dir, best_score)
-            last_summary = format_parallel_summary([summary], [grade], best_score, rnd)
+            lower = getattr(competition, "is_lower_better", False)
+            last_summary = format_parallel_summary([summary], [grade], best_score, rnd, is_lower_better=lower)
 
             snap_after_code = tracker.snapshot()
             plan_in = snap_after_plan[0] - snap_before_plan[0]
@@ -551,7 +552,8 @@ def _run_codex_todo(config: AgentConfig) -> dict[str, Any]:
             sub_path = agent_dir / config.submission_file
             nb_path = jupyter.get_notebook_path()
             best_score, grade = _grade_and_track_best(competition, sub_path, nb_path, run_dir, best_score)
-            last_summary = format_parallel_summary([summary], [grade], best_score, rnd)
+            lower = getattr(competition, "is_lower_better", False)
+            last_summary = format_parallel_summary([summary], [grade], best_score, rnd, is_lower_better=lower)
 
             snap_after_code = tracker.snapshot()
             plan_in = snap_after_plan[0] - snap_before_plan[0]

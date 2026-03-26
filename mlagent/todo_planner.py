@@ -26,7 +26,8 @@ Your todo list format (one item per line):
 ## Suggested Task Types
 - Build a baseline model + valid submission (save OOF predictions to ./artifacts/).
 - Build a different model family (save OOF to ./artifacts/ for future stacking).
-- Stack existing OOF artifacts into a meta-learner + calibrate probabilities.
+- Stack existing OOF artifacts into a meta-learner. Calibrate only if metric is
+  probability-based (log-loss, Brier); skip for ranking metrics (AUC, accuracy).
 - Multiple model + stacking tasks can appear in the same round.
 - Diverse weak models stacked > one strong model tuned heavily.
 

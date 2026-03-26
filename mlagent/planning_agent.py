@@ -39,8 +39,14 @@ on its own.
 ## Model Combination (Stacking)
 - Diverse weak models stacked together outperform a single strong model tuned heavily.
 - OOF protocol: K-fold cross-validation → save oof_train.npy and test_preds.npy per model.
-- Stacking: load OOF artifacts, stack as columns, train a meta-learner (LR or XGBoost).
-- Calibration: CalibratedClassifierCV (isotonic) on the meta-model improves log-loss.
+- Stacking: load OOF artifacts, stack as columns, train a meta-learner.
+  Prefer a non-linear meta-learner (XGBoost, LightGBM) when you have 4+ diverse OOF
+  sources — it captures interactions between base models that LR misses.
+  LR is acceptable for 2-3 OOF sources or as a quick sanity check.
+- Calibration: after stacking, apply CalibratedClassifierCV (isotonic) to the
+  meta-model ONLY when the metric is probability-based (log-loss, Brier). For ranking
+  metrics (AUC, accuracy, F1), calibration does NOT change rankings and won't help.
+  Always tell the agent to verify calibration improves CV score before submitting.
 - Select diverse OOF sources (e.g. linear, NB, tree, neural) — avoid near-duplicates.
 
 ## Key Principles

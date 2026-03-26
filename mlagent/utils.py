@@ -155,6 +155,7 @@ def format_summary(
     grade: Any,
     best_score: float | None,
     round_num: int,
+    is_lower_better: bool = False,
 ) -> str:
     parts = [f"=== After round {round_num} ===", f"Coding agent summary:\n{coding_summary}"]
     if grade is not None:
@@ -163,7 +164,8 @@ def format_summary(
         err = getattr(grade, "error", None)
         parts.append(f"Grading: score={sc}, valid={valid}, error={err}")
     if best_score is not None:
-        parts.append(f"Best score so far: {best_score}")
+        direction = "lower is better" if is_lower_better else "higher is better"
+        parts.append(f"Best score so far: {best_score} ({direction})")
     return "\n\n".join(parts)
 
 
@@ -172,6 +174,7 @@ def format_parallel_summary(
     grades: list[Any],
     best_score: float | None,
     round_num: int,
+    is_lower_better: bool = False,
 ) -> str:
     """Merge results from N parallel coding agents into one summary for the planner."""
     parts = [f"=== After round {round_num} ({len(agent_summaries)} agent(s)) ==="]
@@ -184,7 +187,8 @@ def format_parallel_summary(
             f"Grade: score={sc}, valid={valid}, error={err}"
         )
     if best_score is not None:
-        parts.append(f"Global best score so far: {best_score}")
+        direction = "lower is better" if is_lower_better else "higher is better"
+        parts.append(f"Global best score so far: {best_score} ({direction})")
     return "\n\n".join(parts)
 
 
@@ -199,10 +203,17 @@ class TokenTracker:
     """Accumulates token usage across LLM calls. Thread-safe for parallel agents."""
 
     _COST_PER_1M: dict[str, tuple[float, float]] = {
-        "gpt-5.4-mini": (0.40, 1.60),
-        "gpt-4o": (2.50, 10.00),
+        # Flagship models (standard tier) — prices as of 2026-03
+        "gpt-5.4-pro": (30.00, 180.00),
+        "gpt-5.4-nano": (0.20, 1.25),
+        "gpt-5.4-mini": (0.75, 4.50),
+        "gpt-5.4": (2.50, 15.00),
+        # Specialized models
+        "gpt-5.3-codex": (1.75, 14.00),
+        "gpt-5.3-chat": (1.75, 14.00),
+        # Legacy models
         "gpt-4o-mini": (0.15, 0.60),
-        "gpt-5.1-codex-mini": (1.50, 6.00),
+        "gpt-4o": (2.50, 10.00),
         "o3-mini": (1.10, 4.40),
     }
 

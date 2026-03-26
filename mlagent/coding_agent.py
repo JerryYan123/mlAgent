@@ -100,14 +100,15 @@ def _discover_artifacts(work_dir: Path) -> str:
     return "\n".join(lines)
 
 
-def _coding_system(plan: str, competition: Any, work_dir: Path, submission_name: str) -> str:
+def _coding_system(plan: str, competition: Any, work_dir: Path, submission_name: str, metric_hint: str = "") -> str:
     desc = getattr(competition, "description", "")[:12000]
+    metric_line = f"\nMetric: {metric_hint}\n" if metric_hint else ""
     return f"""You are the coding agent. Work in the Jupyter kernel (folder: {work_dir}).
 Data is under ./input/ (symlink to competition data). Write submission to ./{submission_name}.
 
 Competition description (excerpt):
 {desc}
-
+{metric_line}
 Plan from planning agent:
 {plan}
 
@@ -143,6 +144,17 @@ You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, 
 - Save artifacts IMMEDIATELY after computing them — if a later step times out,
   earlier artifacts are preserved for future stacking.
 - For stacking: load all saved OOF artifacts, stack as columns, train a meta-learner.
+  If you have 4+ diverse OOF sources, prefer a non-linear meta-learner (XGBoost,
+  LightGBM) over LR — it better captures interactions between base models.
+
+## Calibration (context-dependent)
+- For probability-based metrics (log-loss, Brier): calibration (isotonic/sigmoid)
+  almost always helps. Apply CalibratedClassifierCV after stacking.
+- For ranking/threshold metrics (AUC, accuracy, F1): calibration changes predicted
+  probabilities but does NOT change ranking — it won't improve AUC or accuracy.
+  Skip calibration unless your metric is probability-based.
+- ALWAYS verify on CV that calibration actually improves YOUR specific metric
+  before using calibrated predictions in the submission.
 
 ## API Compatibility
 - scikit-learn >=1.5: LogisticRegression does NOT accept `multi_class` parameter (removed).
@@ -158,6 +170,8 @@ You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, 
 - Before trying something new, check if you have saved OOF artifacts for stacking.
 - If the plan says to stack but you have fewer than 3 OOF sets, build more diverse
   base models first.
+- If you just built a stacking model, check if calibration is appropriate for your
+  metric (see Calibration section above). Don't calibrate blindly.
 
 ## Rules
 - Use relative paths; data is under input/
@@ -190,7 +204,9 @@ class CodingAgent:
         max_steps: int,
     ) -> str:
         llm = ToolCallingLLM(self.coding_cfg, tracker=self.tracker)
-        llm.set_system(_coding_system(plan, competition, work_dir, submission_name))
+        lower = getattr(competition, "is_lower_better", False)
+        metric_hint = f"lower is better: {lower}" if lower else "higher is better"
+        llm.set_system(_coding_system(plan, competition, work_dir, submission_name, metric_hint=metric_hint))
         artifacts_hint = _discover_artifacts(work_dir)
         start_msg = (
             "Start the round. Use tools to implement the plan. "

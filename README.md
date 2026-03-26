@@ -31,6 +31,12 @@ nohup python -u scripts/run.py --competition spooky-author-identification > mlag
 tail -f mlagent_run.log
 ```
 
+nohup python -u scripts/run.py --competition random-acts-of-pizza max_rounds=40 > pizza_baseline_run.log 2>&1 &
+
+nohup python -u scripts/run.py --config configs/board_replan.yaml --competition random-acts-of-pizza max_rounds=40 > pizza_board_run.log 2>&1 &
+
+nohup python -u scripts/run.py --config configs/codex_todo.yaml --competition random-acts-of-pizza max_rounds=40 > pizza_todo_run.log 2>&1 &
+
 **三种 planning 策略：**
 
 默认跑 `baseline`（`configs/default.yaml`）。用 `--config` 切换：
@@ -40,7 +46,7 @@ tail -f mlagent_run.log
 nohup python -u scripts/run.py > mlagent_run.log 2>&1 &
 
 # Experiment Board：planner 维护 branch 实验板，coder 用 log_to_board 记录实验
-nohup python -u scripts/run.py --config configs/board_replan.yaml > map_run.log 2>&1 &
+nohup python -u scripts/run.py --config configs/board_replan.yaml > board_run.log 2>&1 &
 
 # Codex Todo：planner 生成 todo list，coder 按序执行，定期 revise
 nohup python -u scripts/run.py --config configs/codex_todo.yaml > todo_run.log 2>&1 &
