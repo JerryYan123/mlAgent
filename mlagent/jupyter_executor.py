@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -147,7 +148,8 @@ class JupyterExecutor:
         else:
             kernel_env["CUDA_VISIBLE_DEVICES"] = ""
 
-        kernel_argv = ["python", "-m", "ipykernel_launcher", "-f", "{connection_file}"]
+        kernel_python = os.environ.get("MLAGENT_KERNEL_PYTHON", sys.executable)
+        kernel_argv = [kernel_python, "-m", "ipykernel_launcher", "-f", "{connection_file}"]
         if self.selected_cpu_cores and os.name == "posix":
             try:
                 subprocess.run(["taskset", "--version"], capture_output=True, check=True)

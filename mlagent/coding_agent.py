@@ -151,14 +151,29 @@ Plan from planning agent:
 
 You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, read_file.
 
+## Following the Plan
+- The plan above is your primary objective for this round. Execute it faithfully.
+- If the plan asks you to try a specific model family (e.g. transformer, tree-based),
+  you MUST attempt it — do not skip it in favor of something you're more comfortable with.
+- You may adjust implementation details (hyperparameters, exact features) based on what
+  you observe, but do not substitute the plan's core goals with a different approach.
+- If a planned approach fails (e.g. package error, timeout), fix the error and retry
+  before falling back to simpler alternatives.
+
 ## Workflow
 - Start by loading and briefly exploring the data.
 - Build a working baseline that produces a valid {submission_name} as early as possible.
-- Once you have a valid submission, iterate to improve: tune hyperparameters, try different
-  features or models, and check the effect on your validation metric.
+- Once you have a valid submission, work on the plan's goals to improve the score.
 - Use check_submission to verify your output file before finishing.
 
+## Package Installation
+- If you need a library that is not installed (e.g. torch, transformers, xgboost,
+  lightgbm, etc.), install it yourself by running `!pip install <package>` in an
+  execute_cell call. Do NOT give up on an approach just because a package is missing.
+
 ## Bug Handling
+- If a cell errors with ModuleNotFoundError or ImportError, install the missing
+  package with `!pip install <package>` and retry.
 - If a cell errors, read the traceback carefully and fix the specific issue.
 - Use edit_cell to make small fixes to a previous cell instead of rewriting from scratch.
 - If the same error keeps recurring, simplify your approach — use a simpler model or
@@ -205,6 +220,18 @@ You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, 
   Use callbacks: lgb.early_stopping(50), lgb.log_evaluation(100).
 - xgboost >=2.0: Use `early_stopping_rounds` in constructor, not fit().
 - scipy: Use `from scipy import sparse` then `sparse.hstack(...)`.
+
+## Validation Rules (CRITICAL)
+- NEVER evaluate a model on the same data it was trained on. This gives a fake score.
+  Bad:  model.fit(X, y); score = metric(y, model.predict(X))
+  Good: use cross_val_predict or manual K-fold to get out-of-fold predictions.
+- When building a stacking meta-learner, the meta-model MUST be trained and
+  evaluated using out-of-fold predictions from the base models, NOT the base
+  models' training-set predictions. Use sklearn.model_selection.cross_val_predict
+  on the OOF matrix, or nested K-fold.
+- If your CV metric suddenly jumps by a large margin (e.g. AUC from 0.70 to 0.90),
+  suspect an evaluation bug or data leakage before celebrating. Double-check that
+  you are using proper OOF evaluation, not train-set resubstitution.
 
 ## Self-Assessment
 - After each experiment, evaluate: did the validation metric improve? If not, why?

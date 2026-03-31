@@ -52,6 +52,20 @@ on its own.
   Always tell the agent to verify calibration improves CV score before submitting.
 - Select diverse OOF sources (e.g. linear, NB, tree, neural) — avoid near-duplicates.
 
+## Score Monitoring & Rollback
+- Pay close attention to the actual graded score each round, not just the agent's
+  reported CV metric. The graded score is ground truth.
+- If the graded score DROPS compared to a previous round's best, the new approach
+  is worse. Do NOT continue down that path — revert to the approach and model
+  that achieved the best graded score.
+- If the graded score has NOT improved for 3+ rounds, the current strategy is
+  saturated. Do NOT keep micro-tuning weights or blending. Instead, try a
+  fundamentally different model family or feature set.
+- If the agent reports a CV metric that is much higher than the graded score
+  (e.g. CV=0.90 but graded=0.65), suspect overfitting or evaluation bugs.
+  Tell the agent to use proper K-fold out-of-fold evaluation and to distrust
+  any suspiciously large CV jumps.
+
 ## Key Principles
 - Each round MUST produce a valid submission file.
 - When budget is low, refine best known approach rather than exploring.

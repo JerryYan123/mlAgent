@@ -97,6 +97,8 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
 
     last_summary: Optional[str] = None
     best_score: Optional[float] = None
+    best_round: int = 0
+    score_history: list[tuple[int, Optional[float]]] = []
     start = time.time()
 
     all_jupyters: list[JupyterExecutor] = []
@@ -196,13 +198,23 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
 
                     if is_better:
                         best_score = s
+                        best_round = rnd
                         shutil.copy(sub_path, run_dir / "best_submission.csv")
                         nb_path = jupyters[i].get_notebook_path()
                         shutil.copy(nb_path, run_dir / "best_experiment.ipynb")
                         logger.info("  ★ New best score: %s (agent %d)", best_score, i)
 
+            # Track score for degradation detection
+            round_score = getattr(grades[0], "score", None)
+            score_history.append((rnd, round_score))
+
             summaries = [r or f"Agent {i} produced no summary." for i, r in enumerate(results)]
-            last_summary = format_parallel_summary(summaries, grades, best_score, rnd, is_lower_better=lower)
+            last_summary = format_parallel_summary(
+                summaries, grades, best_score, rnd,
+                is_lower_better=lower,
+                best_round=best_round,
+                score_history=score_history,
+            )
 
             combined_plan = "\n---\n".join(
                 f"Agent {i}: {plans[i][:500]}" for i in range(N)

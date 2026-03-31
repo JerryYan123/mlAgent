@@ -278,6 +278,8 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
 
     last_summary: Optional[str] = None
     best_score: Optional[float] = None
+    best_round: int = 0
+    score_history: list[tuple[int, Optional[float]]] = []
     start = time.time()
 
     agent_dir = run_dir / "agent_0"
@@ -359,9 +361,21 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
 
             sub_path = agent_dir / config.submission_file
             nb_path = jupyter.get_notebook_path()
+            prev_best = best_score
             best_score, grade = _grade_and_track_best(competition, sub_path, nb_path, run_dir, best_score)
+            if best_score != prev_best:
+                best_round = rnd
             lower = getattr(competition, "is_lower_better", False)
-            last_summary = format_parallel_summary([summary], [grade], best_score, rnd, is_lower_better=lower)
+
+            round_score = getattr(grade, "score", None)
+            score_history.append((rnd, round_score))
+
+            last_summary = format_parallel_summary(
+                [summary], [grade], best_score, rnd,
+                is_lower_better=lower,
+                best_round=best_round,
+                score_history=score_history,
+            )
 
             snap_after_code = tracker.snapshot()
             plan_in = snap_after_plan[0] - snap_before_plan[0]

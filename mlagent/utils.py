@@ -175,6 +175,8 @@ def format_parallel_summary(
     best_score: float | None,
     round_num: int,
     is_lower_better: bool = False,
+    best_round: int = 0,
+    score_history: list[tuple[int, float | None]] | None = None,
 ) -> str:
     """Merge results from N parallel coding agents into one summary for the planner."""
     parts = [f"=== After round {round_num} ({len(agent_summaries)} agent(s)) ==="]
@@ -188,7 +190,36 @@ def format_parallel_summary(
         )
     if best_score is not None:
         direction = "lower is better" if is_lower_better else "higher is better"
-        parts.append(f"Global best score so far: {best_score} ({direction})")
+        parts.append(f"Global best score so far: {best_score} (round {best_round}, {direction})")
+
+    # --- Score health signals ---
+    if score_history and best_score is not None and best_round > 0:
+        rounds_since_best = round_num - best_round
+        current_score = getattr(grades[0], "score", None)
+
+        # Stagnation warning
+        if rounds_since_best >= 3:
+            parts.append(
+                f"⚠ STAGNATION: no improvement for {rounds_since_best} rounds "
+                f"(best was round {best_round}). Consider a fundamentally different "
+                f"approach instead of micro-tuning. The best_submission.csv from "
+                f"round {best_round} is saved and will be used if you don't beat it."
+            )
+
+        # Degradation warning
+        if current_score is not None:
+            if is_lower_better:
+                gap = current_score - best_score
+            else:
+                gap = best_score - current_score
+            if gap > 0 and abs(gap / max(abs(best_score), 1e-9)) > 0.02:
+                parts.append(
+                    f"⚠ DEGRADATION: this round's score ({current_score:.5f}) is "
+                    f"significantly worse than best ({best_score:.5f} at round "
+                    f"{best_round}). Your recent changes likely hurt performance. "
+                    f"Consider reverting to the approach used in round {best_round}."
+                )
+
     return "\n\n".join(parts)
 
 
