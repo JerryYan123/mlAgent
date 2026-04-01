@@ -233,8 +233,9 @@ def _board_coding_system(
     work_dir: Path,
     submission_name: str,
     board_str: str,
+    cell_timeout: int = 2400,
 ) -> str:
-    base = _coding_system(plan, competition, work_dir, submission_name)
+    base = _coding_system(plan, competition, work_dir, submission_name, cell_timeout=cell_timeout)
     return f"""{base}
 
 ## Experiment Board
@@ -283,6 +284,14 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
     start = time.time()
 
     agent_dir = run_dir / "agent_0"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    # Persistent kernel — survives across rounds
+    jupyter = JupyterExecutor(
+        work_dir=agent_dir,
+        data_dir=competition.data_dir,
+        jupyter_cfg=config.jupyter,
+    )
 
     try:
         for rnd in range(1, config.max_rounds + 1):
@@ -300,19 +309,13 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
             snap_after_plan = tracker.snapshot()
             logger.info("Plan generated (board has %d entries)", len(board.entries))
 
-            agent_dir.mkdir(parents=True, exist_ok=True)
-            jupyter = JupyterExecutor(
-                work_dir=agent_dir,
-                data_dir=competition.data_dir,
-                jupyter_cfg=config.jupyter,
-            )
             at = PromptTracer(agent_dir / "debug_prompts", enabled=bool(config.trace_prompts))
             coder = CodingAgent(config.coding_llm, tracer=at, agent_idx=0, tracker=tracker)
             tag = "[Agent 0]"
 
             llm = ToolCallingLLM(config.coding_llm, tracker=tracker)
             board_str = board.to_string()
-            llm.set_system(_board_coding_system(plan, competition, agent_dir, config.submission_file, board_str))
+            llm.set_system(_board_coding_system(plan, competition, agent_dir, config.submission_file, board_str, cell_timeout=config.jupyter.cell_timeout))
             artifacts_hint = _discover_artifacts(agent_dir)
             start_msg = (
                 f"Start the round. Use tools to implement the plan. "
@@ -327,37 +330,33 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
             tools.append(LOG_TO_BOARD_TOOL)
             max_steps = config.max_steps_per_round
 
-            try:
-                step = 0
-                while step < max_steps:
-                    tool_names = _run_coding_step(
-                        llm, tools, coder, jupyter, agent_dir, config.submission_file,
-                        step, max_steps, at, tag,
-                        board=board, round_num=rnd,
-                    )
-                    has_real_tool = any(n != "log_to_board" for n in tool_names)
-                    if has_real_tool or not tool_names:
-                        step += 1
-
-                logger.info("%s All %d steps done, generating summary...", tag, max_steps)
-                llm.append_user(
-                    "The coding round is over. Provide a concise summary: "
-                    "what was tried, what worked, what errors occurred, current metrics, "
-                    "and suggestions for the next round."
+            step = 0
+            while step < max_steps:
+                tool_names = _run_coding_step(
+                    llm, tools, coder, jupyter, agent_dir, config.submission_file,
+                    step, max_steps, at, tag,
+                    board=board, round_num=rnd,
                 )
-                summary = llm.chat_no_tools() or "No summary generated."
+                has_real_tool = any(n != "log_to_board" for n in tool_names)
+                if has_real_tool or not tool_names:
+                    step += 1
 
-                if not board.has_experiments_from_round(rnd):
-                    logger.info("%s No log_to_board calls this round — extracting from summary", tag)
-                    board.add_result(
-                        branch="auto",
-                        experiment=f"Round {rnd} (auto-extracted)",
-                        result=summary[:500],
-                        round_num=rnd,
-                    )
+            logger.info("%s All %d steps done, generating summary...", tag, max_steps)
+            llm.append_user(
+                "The coding round is over. Provide a concise summary: "
+                "what was tried, what worked, what errors occurred, current metrics, "
+                "and suggestions for the next round."
+            )
+            summary = llm.chat_no_tools() or "No summary generated."
 
-            finally:
-                jupyter.shutdown()
+            if not board.has_experiments_from_round(rnd):
+                logger.info("%s No log_to_board calls this round — extracting from summary", tag)
+                board.add_result(
+                    branch="auto",
+                    experiment=f"Round {rnd} (auto-extracted)",
+                    result=summary[:500],
+                    round_num=rnd,
+                )
 
             sub_path = agent_dir / config.submission_file
             nb_path = jupyter.get_notebook_path()
@@ -402,6 +401,7 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
             logger.info("Round %d done (%.1f min total). Best score: %s", rnd, elapsed_min, best_score)
 
     finally:
+        jupyter.shutdown()
         best_sub = run_dir / "best_submission.csv"
         if best_sub.exists():
             shutil.copy(best_sub, run_dir / config.submission_file)

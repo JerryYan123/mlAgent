@@ -102,6 +102,52 @@ def _discover_artifacts(work_dir: Path) -> str:
     return "\n".join(lines)
 
 
+def _data_profile(work_dir: Path) -> str:
+    """Scan ./input/ and return factual data statistics."""
+    try:
+        import pandas as pd
+        import json as _json
+
+        input_dir = work_dir / "input"
+        if not input_dir.exists():
+            return ""
+
+        parts = []
+        for f in sorted(input_dir.rglob("*")):
+            if f.is_dir():
+                continue
+            name = str(f.relative_to(input_dir))
+            try:
+                if f.suffix == ".csv":
+                    df = pd.read_csv(f, nrows=200)
+                    # Count rows via chunked iteration — constant memory
+                    try:
+                        nrows = sum(chunk.shape[0] for chunk in pd.read_csv(f, usecols=[0], chunksize=50000))
+                    except Exception:
+                        nrows = sum(1 for _ in open(f, encoding="utf-8", errors="ignore")) - 1
+                    cols_info = []
+                    for c in df.columns:
+                        if df[c].dtype == object:
+                            avg_len = int(df[c].dropna().str.len().mean()) if len(df[c].dropna()) > 0 else 0
+                            cols_info.append(f"{c}(text, avg {avg_len} chars)")
+                        else:
+                            cols_info.append(f"{c}({df[c].dtype})")
+                    parts.append(f"{name}: {nrows} rows, {df.shape[1]} cols — {', '.join(cols_info[:10])}")
+                elif f.suffix == ".json":
+                    with open(f, encoding="utf-8") as fh:
+                        data = _json.load(fh)
+                    if isinstance(data, list):
+                        parts.append(f"{name}: {len(data)} records (JSON)")
+                    elif isinstance(data, dict):
+                        parts.append(f"{name}: dict with {len(data)} keys")
+            except Exception:
+                continue
+
+        return "Data files:\n" + "\n".join(f"  {p}" for p in parts) if parts else ""
+    except Exception:
+        return ""
+
+
 def _gpu_hint(work_dir: Path) -> str:
     """Detect available GPU and return a hint string for the coding agent."""
     try:
@@ -135,17 +181,26 @@ def _gpu_hint(work_dir: Path) -> str:
         return ""
 
 
-def _coding_system(plan: str, competition: Any, work_dir: Path, submission_name: str, metric_hint: str = "") -> str:
+def _coding_system(plan: str, competition: Any, work_dir: Path, submission_name: str, metric_hint: str = "", cell_timeout: int = 2400) -> str:
     desc = getattr(competition, "description", "")[:12000]
     metric_line = f"\nMetric: {metric_hint}\n" if metric_hint else ""
     gpu_info = _gpu_hint(work_dir)
-    gpu_section = f"\n{gpu_info}\n" if gpu_info else ""
+    data_profile = _data_profile(work_dir)
+    env_parts = []
+    if gpu_info:
+        env_parts.append(gpu_info)
+    if data_profile:
+        env_parts.append(data_profile)
+    env_parts.append(f"Cell timeout: {cell_timeout}s — any single execute_cell call that exceeds this will be killed.")
+    env_section = "\n".join(env_parts)
     return f"""You are the coding agent. Work in the Jupyter kernel (folder: {work_dir}).
 Data is under ./input/ (symlink to competition data). Write submission to ./{submission_name}.
 
 Competition description (excerpt):
 {desc}
-{metric_line}{gpu_section}
+{metric_line}
+{env_section}
+
 Plan from planning agent:
 {plan}
 
@@ -202,6 +257,9 @@ You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, 
 - For stacking: load all saved OOF artifacts, stack as columns, train a meta-learner.
   If you have 4+ diverse OOF sources, prefer a non-linear meta-learner (XGBoost,
   LightGBM) over LR — it better captures interactions between base models.
+- Always compare your stacked/blended OOF score against the best single-model OOF.
+  Stacking is only worthwhile if it actually improves the metric — adding weaker
+  models to a blend can hurt rather than help.
 
 ## Calibration (context-dependent)
 - For probability-based metrics (log-loss, Brier): calibration (isotonic/sigmoid)
@@ -274,7 +332,8 @@ class CodingAgent:
         llm = ToolCallingLLM(self.coding_cfg, tracker=self.tracker)
         lower = getattr(competition, "is_lower_better", False)
         metric_hint = f"lower is better: {lower}" if lower else "higher is better"
-        llm.set_system(_coding_system(plan, competition, work_dir, submission_name, metric_hint=metric_hint))
+        cell_timeout = getattr(jupyter.cfg, "cell_timeout", 2400)
+        llm.set_system(_coding_system(plan, competition, work_dir, submission_name, metric_hint=metric_hint, cell_timeout=cell_timeout))
         artifacts_hint = _discover_artifacts(work_dir)
         start_msg = (
             "Start the round. Use tools to implement the plan. "

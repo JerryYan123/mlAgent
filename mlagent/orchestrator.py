@@ -101,7 +101,26 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
     score_history: list[tuple[int, Optional[float]]] = []
     start = time.time()
 
-    all_jupyters: list[JupyterExecutor] = []
+    # Create persistent kernels — survive across rounds so imports/data persist
+    agent_dirs: list[Path] = []
+    jupyters: list[JupyterExecutor] = []
+    agent_tracers: list[PromptTracer] = []
+
+    for i in range(N):
+        agent_dir = run_dir / f"agent_{i}"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        jup = JupyterExecutor(
+            work_dir=agent_dir,
+            data_dir=competition.data_dir,
+            jupyter_cfg=config.jupyter,
+        )
+        at_dir = agent_dir / "debug_prompts" if config.trace_prompts else None
+        at = PromptTracer(at_dir, enabled=bool(config.trace_prompts))
+        agent_dirs.append(agent_dir)
+        jupyters.append(jup)
+        agent_tracers.append(at)
+
+    all_jupyters = jupyters
 
     try:
         for rnd in range(1, config.max_rounds + 1):
@@ -123,29 +142,6 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
             for i, p in enumerate(plans):
                 first_line = p.strip().split("\n")[0][:120]
                 logger.info("  Agent %d plan: %s", i, first_line)
-
-            agent_dirs: list[Path] = []
-            jupyters: list[JupyterExecutor] = []
-            agent_tracers: list[PromptTracer] = []
-
-            for i in range(N):
-                agent_dir = run_dir / f"agent_{i}"
-                agent_dir.mkdir(parents=True, exist_ok=True)
-
-                jup = JupyterExecutor(
-                    work_dir=agent_dir,
-                    data_dir=competition.data_dir,
-                    jupyter_cfg=config.jupyter,
-                )
-
-                at_dir = agent_dir / "debug_prompts" if config.trace_prompts else None
-                at = PromptTracer(at_dir, enabled=bool(config.trace_prompts))
-
-                agent_dirs.append(agent_dir)
-                jupyters.append(jup)
-                agent_tracers.append(at)
-
-            all_jupyters = jupyters
 
             results: list[Optional[str]] = [None] * N
 
@@ -256,10 +252,6 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                 "Round %d done (%.1f min total). Best score: %s",
                 rnd, elapsed_min, best_score,
             )
-
-            for jup in jupyters:
-                jup.shutdown()
-            all_jupyters = []
 
     finally:
         best_sub = run_dir / "best_submission.csv"

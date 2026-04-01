@@ -40,7 +40,9 @@ on its own.
 - Final rounds: refine the best approach. Small tuning, not major new experiments.
 
 ## Model Combination (Stacking)
-- Diverse weak models stacked together outperform a single strong model tuned heavily.
+- Stacking diverse models often outperforms any single model, but not always.
+  If the coding agent reports that a single model's OOF beats the stacked OOF,
+  trust that signal — plan to improve that model rather than force more blending.
 - OOF protocol: K-fold cross-validation → save oof_train.npy and test_preds.npy per model.
 - Stacking: load OOF artifacts, stack as columns, train a meta-learner.
   Prefer a non-linear meta-learner (XGBoost, LightGBM) when you have 4+ diverse OOF

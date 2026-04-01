@@ -5,7 +5,7 @@ submission_file: submission.csv
 
 jupyter:
   kernel_name: python3
-  cell_timeout: 900
+  cell_timeout: 2400
   monitor_interval: 120
   gpu: "auto"
   max_cpu_cores: 8
@@ -35,6 +35,6 @@ replan_interval: 5
 num_coding_agents: 1
 max_rounds: 10
 max_steps_per_round: 20
-total_time_limit: 14400
+total_time_limit: 43200
 
 trace_prompts: true
