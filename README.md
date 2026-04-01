@@ -34,7 +34,6 @@ nohup python -u scripts/run.py max_rounds=30 > spooky_baseline_run.log 2>&1 &
 
 nohup python -u scripts/run.py --config configs/board_replan.yaml max_rounds=30 > spooky_board_run.log 2>&1 &
 
-
 nohup python -u scripts/run.py --competition jigsaw-toxic-comment-classification-challenge max_rounds=30 > jigsaw_baseline_run.log 2>&1 &
 
 nohup python -u scripts/run.py --config configs/board_replan.yaml --competition jigsaw-toxic-comment-classification-challenge max_rounds=30 > jigsaw_board_run.log 2>&1 &
