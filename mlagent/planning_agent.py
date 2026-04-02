@@ -1,17 +1,152 @@
-"""Planning agent: long-term memory across rounds."""
+"""Planning agent: long-term memory across rounds, with diagnostic tools."""
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 from typing import Any, Optional
 
 from mlagent.config import AgentConfig
-from mlagent.llm import PlanningLLM
+from mlagent.llm import ToolCallingLLM
 from mlagent.utils import PromptTracer, TokenTracker
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Planning tools — read-only, let planner explore notebook & artifacts
+# ---------------------------------------------------------------------------
+
+PLANNING_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_notebook_cell",
+            "description": (
+                "Read a specific cell from the coding agent's Jupyter notebook. "
+                "Returns the cell's source code and its output (stdout, errors). "
+                "Use this to inspect what code ran and what errors occurred."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cell_index": {
+                        "type": "integer",
+                        "description": "0-based index. Use negative indices to read from the end (e.g. -1 = last cell).",
+                    },
+                },
+                "required": ["cell_index"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_artifacts",
+            "description": (
+                "List all saved OOF/test prediction artifacts (.npy files) in the workspace. "
+                "Returns file names and sizes."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a text file from the workspace (e.g. a log or CSV header).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path under the agent workspace."},
+                    "max_lines": {"type": "integer", "default": 50},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+]
+
+
+def _dispatch_planning_tool(
+    name: str,
+    args: dict[str, Any],
+    notebook_cells: list,
+    work_dir: Path,
+) -> str:
+    """Execute a planning tool and return the result as a string."""
+    if name == "read_notebook_cell":
+        idx = int(args.get("cell_index", -1))
+        if not notebook_cells:
+            return "No notebook cells available."
+        try:
+            cell = notebook_cells[idx]
+        except IndexError:
+            return f"Invalid cell_index {idx}. Valid range: 0 to {len(notebook_cells)-1} (or negative)."
+
+        source = getattr(cell, "source", None) or cell.get("source", "")
+        outputs = getattr(cell, "outputs", None) or cell.get("outputs", [])
+
+        # Extract output text
+        out_parts = []
+        for output in outputs:
+            out_type = getattr(output, "output_type", None) or output.get("output_type", "")
+            if out_type == "error":
+                tb = getattr(output, "traceback", None) or output.get("traceback", [])
+                text = "\n".join(tb) if isinstance(tb, list) else str(tb)
+                # Strip ANSI codes for readability
+                text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+                out_parts.append(f"[ERROR]\n{text}")
+            elif out_type in ("stream", "execute_result"):
+                raw = getattr(output, "text", None) or output.get("text", "")
+                text = "".join(raw) if isinstance(raw, list) else str(raw)
+                out_parts.append(text)
+
+        output_text = "\n".join(out_parts)
+        # Truncate to avoid blowing context
+        if len(source) > 2000:
+            source = source[:2000] + "\n... (truncated)"
+        if len(output_text) > 3000:
+            output_text = output_text[:3000] + "\n... (truncated)"
+
+        return f"Cell [{idx}] ({len(notebook_cells)} total cells):\n--- CODE ---\n{source}\n--- OUTPUT ---\n{output_text}"
+
+    if name == "list_artifacts":
+        art_dir = work_dir / "artifacts"
+        if not art_dir.exists():
+            return "No artifacts directory found."
+        files = sorted(art_dir.glob("*.npy"))
+        if not files:
+            return "Artifacts directory exists but is empty."
+        lines = []
+        for f in files:
+            size_kb = f.stat().st_size / 1024
+            lines.append(f"  {f.name} ({size_kb:.0f} KB)")
+        return f"{len(files)} artifacts:\n" + "\n".join(lines)
+
+    if name == "read_file":
+        rel = args.get("path", "")
+        max_lines = int(args.get("max_lines", 50))
+        path = (work_dir / rel).resolve()
+        if not str(path).startswith(str(work_dir.resolve())):
+            return "Error: path escapes workspace."
+        if not path.is_file():
+            return f"Error: not a file: {rel}"
+        text = path.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        result = "\n".join(lines[:max_lines])
+        if len(lines) > max_lines:
+            result += f"\n... ({len(lines) - max_lines} more lines)"
+        return result
+
+    return f"Unknown tool: {name}"
+
+
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
 
 def _planning_system(competition_description: str, data_preview: str, metric_hint: str) -> str:
     return f"""You are an expert ML competition strategist.
@@ -20,6 +155,17 @@ The coding agent works autonomously each round: it has many steps and can build 
 models, do stacking, and calibration all within a single round. Your job is to tell it
 WHAT to achieve, and HOW. The agent handles debugging and error recovery
 on its own.
+
+## Your Tools
+You have diagnostic tools to inspect the coding agent's work:
+- read_notebook_cell(cell_index): read code and output of any cell in the notebook.
+  Use negative indices (e.g. -1, -2) to read recent cells.
+- list_artifacts(): see all saved .npy prediction files on disk.
+- read_file(path): read any file in the workspace.
+
+Use these tools between rounds to understand what actually happened — don't rely solely
+on the coding agent's summary, which may be incomplete or misleading. Look at actual
+errors, actual scores, and actual artifacts before planning the next round.
 
 ## How to Plan Each Round
 - Each round, give the coding agent a clear goal with 2-4 concrete tasks.
@@ -89,6 +235,10 @@ maximises the chance of finding a winning approach in each round.
 Propose a clear, actionable plan for each coding agent. Keep each plan under ~800 words."""
 
 
+# ---------------------------------------------------------------------------
+# Planning Agent
+# ---------------------------------------------------------------------------
+
 class PlanningAgent:
     def __init__(
         self,
@@ -106,7 +256,7 @@ class PlanningAgent:
         llm_cfg = cfg.planning_llm
         if not llm_cfg.keep_history:
             logger.warning("planning_llm.keep_history should be true for long-term memory")
-        self.llm = PlanningLLM(llm_cfg, tracker=tracker)
+        self.llm = ToolCallingLLM(llm_cfg, tracker=tracker)
 
         desc = getattr(competition, "description", "") or ""
         preview = competition.get_data_preview() if hasattr(competition, "get_data_preview") else ""
@@ -115,6 +265,52 @@ class PlanningAgent:
 
         sys_prompt = _planning_system(desc, preview, metric_hint)
         self.llm.messages = [{"role": "system", "content": sys_prompt}]
+
+        # These get set by the orchestrator each round
+        self._notebook_cells: list = []
+        self._work_dir: Path = Path(".")
+
+    def set_notebook_context(self, notebook_cells: list, work_dir: Path) -> None:
+        """Called by orchestrator to give planner access to the notebook."""
+        self._notebook_cells = notebook_cells
+        self._work_dir = work_dir
+
+    def _run_tool_loop(self, max_tool_calls: int = 5) -> str:
+        """Let planner use tools to investigate, then return its final text response."""
+        for _ in range(max_tool_calls):
+            result = self.llm.complete_with_tools(PLANNING_TOOLS, tool_choice="auto")
+
+            if not result.tool_calls:
+                # No more tools — this is the final text response
+                if result.content:
+                    self.llm.messages.append({"role": "assistant", "content": result.content})
+                return result.content or ""
+
+            # Process tool calls
+            assistant_msg = {
+                "role": "assistant",
+                "content": result.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                    }
+                    for tc in result.tool_calls
+                ],
+            }
+            self.llm.messages.append(assistant_msg)
+
+            for tc in result.tool_calls:
+                logger.info("  Planner tool: %s(%s)", tc.name, str(tc.arguments)[:80])
+                out = _dispatch_planning_tool(
+                    tc.name, tc.arguments, self._notebook_cells, self._work_dir,
+                )
+                self.llm.append_tool_result(tc.id, out[:5000])
+
+        # Exhausted tool calls, ask for final answer
+        self.llm.append_user("Please provide your response now.")
+        return self.llm.chat_no_tools()
 
     def plan(self, round_num: int, last_summary: Optional[str]) -> str:
         budget = (
@@ -134,14 +330,19 @@ class PlanningAgent:
                 f"## Overall Strategy\n(roadmap for {self.max_rounds} rounds)\n\n"
                 f"## Round 1 Plan\n(specific actions for the coding agent this round)"
             )
+            reply = self._run_tool_loop(max_tool_calls=3)
         else:
+            # Step 1: Diagnose with tools — planner can inspect notebook cells
             self.llm.append_user(
                 f"{budget}\n\n"
                 f"Results from round {round_num - 1}:\n{last_summary or '(none)'}\n\n"
-                f"Review your overall strategy and adjust if needed based on these results. "
+                f"Before planning, diagnose what happened. Use your tools "
+                f"(read_notebook_cell, list_artifacts, read_file) to inspect actual "
+                f"errors, outputs, and scores if the summary is unclear.\n\n"
                 f"Then provide the plan for round {round_num}."
             )
-        reply = self.llm.chat()
+            reply = self._run_tool_loop(max_tool_calls=5)
+
         if self.tracer:
             self.tracer.write(f"planning_r{round_num}", str(self.llm.messages[-2:]), reply)
         return reply
@@ -152,12 +353,6 @@ class PlanningAgent:
         last_summary: Optional[str],
         num_agents: int,
     ) -> list[str]:
-        """Generate plans for N coding agents.
-
-        When num_agents == 1 this delegates to plan() directly.
-        When num_agents > 1 it asks the planner for N diverse sub-plans
-        using ``## Agent 0 Plan`` / ``## Agent 1 Plan`` headers.
-        """
         if num_agents <= 1:
             return [self.plan(round_num, last_summary)]
 
@@ -188,15 +383,16 @@ class PlanningAgent:
                 f"{budget}\n\n"
                 f"Results from round {round_num - 1}:\n{last_summary or '(none)'}\n\n"
                 f"You have {num_agents} coding agents running in parallel this round. "
-                f"Review your overall strategy and adjust if needed based on these results. "
-                f"Then provide {num_agents} diverse plans using these exact headers:\n"
+                f"Use your tools to inspect the notebook if needed, then "
+                f"review your overall strategy and provide {num_agents} diverse plans "
+                f"using these exact headers:\n"
                 + "\n".join(
                     f"## Agent {i} Plan\n(specific actions for agent {i})"
                     for i in range(num_agents)
                 )
             )
 
-        reply = self.llm.chat()
+        reply = self._run_tool_loop(max_tool_calls=5)
         if self.tracer:
             self.tracer.write(f"planning_r{round_num}", str(self.llm.messages[-2:]), reply)
 

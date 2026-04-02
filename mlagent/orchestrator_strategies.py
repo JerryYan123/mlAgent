@@ -20,6 +20,7 @@ from mlagent.utils import (
     ExperimentLog,
     PromptTracer,
     TokenTracker,
+    extract_round_diagnostics,
     format_parallel_summary,
     setup_logging,
     auto_select_gpu,
@@ -305,6 +306,7 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
             logger.info("ROUND %d/%d  (elapsed %.1f min, best_score=%s)", rnd, config.max_rounds, elapsed_min, best_score)
             logger.info("-" * 60)
 
+            planner.set_notebook_context(jupyter.nb.cells, agent_dir)
             plan = planner.plan(rnd, last_summary)
             snap_after_plan = tracker.snapshot()
             logger.info("Plan generated (board has %d entries)", len(board.entries))
@@ -375,6 +377,15 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
                 best_round=best_round,
                 score_history=score_history,
             )
+
+            # Append notebook diagnostics
+            diag = extract_round_diagnostics(
+                jupyter.nb.cells,
+                round_start_cell=max(0, len(jupyter.nb.cells) - config.max_steps_per_round - 5),
+                artifacts_dir=agent_dir / "artifacts",
+            )
+            if diag:
+                last_summary += f"\n\n--- Diagnostics ---\n{diag}"
 
             snap_after_code = tracker.snapshot()
             plan_in = snap_after_plan[0] - snap_before_plan[0]

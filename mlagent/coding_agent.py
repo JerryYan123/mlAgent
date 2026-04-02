@@ -80,6 +80,19 @@ def build_tools(submission_name: str) -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "restart_kernel",
+                "description": (
+                    "Restart the Jupyter kernel. This clears all variables and import "
+                    "caches but preserves files on disk (artifacts, submission). "
+                    "Use when an import is persistently broken due to corrupted "
+                    "module cache (e.g. ImportError that persists after pip install)."
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
     ]
 
 
@@ -204,7 +217,7 @@ Competition description (excerpt):
 Plan from planning agent:
 {plan}
 
-You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, read_file.
+You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, read_file, restart_kernel.
 
 ## Following the Plan
 - The plan above is your primary objective for this round. Execute it faithfully.
@@ -229,6 +242,8 @@ You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, 
 ## Bug Handling
 - If a cell errors with ModuleNotFoundError or ImportError, install the missing
   package with `!pip install <package>` and retry.
+- If an ImportError persists after pip install (e.g. broken module cache),
+  use the restart_kernel tool to get a clean Python state, then re-import.
 - If a cell errors, read the traceback carefully and fix the specific issue.
 - Use edit_cell to make small fixes to a previous cell instead of rewriting from scratch.
 - If the same error keeps recurring, simplify your approach — use a simpler model or
@@ -489,4 +504,8 @@ class CodingAgent:
             if len(lines) > max_lines:
                 text += f"\n... ({len(lines) - max_lines} more lines)"
             return text
+        if name == "restart_kernel":
+            logger.info("Restarting kernel on agent request...")
+            jupyter.restart_kernel()
+            return json.dumps({"success": True, "message": "Kernel restarted. All variables cleared. Files on disk (artifacts, submission) are preserved."})
         return f"unknown tool {name}"

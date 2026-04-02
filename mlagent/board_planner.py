@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Any, Optional
 
 from mlagent.config import AgentConfig
 from mlagent.experiment_board import ExperimentBoard
-from mlagent.llm import PlanningLLM
+from mlagent.llm import ToolCallingLLM
+from mlagent.planning_agent import PLANNING_TOOLS, _dispatch_planning_tool
 from mlagent.utils import PromptTracer, TokenTracker
 
 logger = logging.getLogger(__name__)
@@ -103,7 +106,7 @@ class BoardPlanningAgent:
         self.max_steps = cfg.max_steps_per_round
 
         llm_cfg = cfg.planning_llm
-        self.llm = PlanningLLM(llm_cfg, tracker=tracker)
+        self.llm = ToolCallingLLM(llm_cfg, tracker=tracker)
 
         desc = getattr(competition, "description", "") or ""
         preview = competition.get_data_preview() if hasattr(competition, "get_data_preview") else ""
@@ -113,6 +116,44 @@ class BoardPlanningAgent:
 
         sys_prompt = _board_system(desc, preview, metric_hint)
         self.llm.messages = [{"role": "system", "content": sys_prompt}]
+
+        self._notebook_cells: list = []
+        self._work_dir: Path = Path(".")
+
+    def set_notebook_context(self, notebook_cells: list, work_dir: Path) -> None:
+        self._notebook_cells = notebook_cells
+        self._work_dir = work_dir
+
+    def _run_tool_loop(self, max_tool_calls: int = 5) -> str:
+        for _ in range(max_tool_calls):
+            result = self.llm.complete_with_tools(PLANNING_TOOLS, tool_choice="auto")
+            if not result.tool_calls:
+                if result.content:
+                    self.llm.messages.append({"role": "assistant", "content": result.content})
+                return result.content or ""
+
+            assistant_msg = {
+                "role": "assistant",
+                "content": result.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+                    }
+                    for tc in result.tool_calls
+                ],
+            }
+            self.llm.messages.append(assistant_msg)
+            for tc in result.tool_calls:
+                logger.info("  Board planner tool: %s(%s)", tc.name, str(tc.arguments)[:80])
+                out = _dispatch_planning_tool(
+                    tc.name, tc.arguments, self._notebook_cells, self._work_dir,
+                )
+                self.llm.append_tool_result(tc.id, out[:5000])
+
+        self.llm.append_user("Please provide your response now.")
+        return self.llm.chat_no_tools()
 
     def plan(self, round_num: int, last_summary: Optional[str]) -> str:
         budget = (
@@ -138,13 +179,15 @@ class BoardPlanningAgent:
                 f"{budget}\n\n"
                 f"## Experiment Board\n{board_str}\n\n"
                 f"Summary from round {round_num - 1}:\n{last_summary or '(none)'}\n\n"
+                f"Use your tools (read_notebook_cell, list_artifacts, read_file) to "
+                f"inspect actual errors and scores if needed.\n\n"
                 f"Review the board. Update branch annotations if needed — mark dead ends, "
                 f"highlight promising directions, add new branches if new ideas emerge.\n\n"
                 f"Then provide the plan for round {round_num}."
             )
 
         self.llm.append_user(prompt)
-        reply = self.llm.chat()
+        reply = self._run_tool_loop(max_tool_calls=5)
 
         self.board.update_from_planner(reply, round_num)
 

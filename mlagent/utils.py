@@ -223,6 +223,120 @@ def format_parallel_summary(
     return "\n\n".join(parts)
 
 
+def extract_round_diagnostics(
+    notebook_cells: list,
+    round_start_cell: int = 0,
+    artifacts_dir: str | Path | None = None,
+) -> str:
+    """Extract structured diagnostics from notebook outputs for the planner.
+
+    This replaces the lossy LLM-generated summary with objective facts
+    extracted directly from the notebook: what ran, what failed, what scores
+    were achieved, and what artifacts exist.
+    """
+    from pathlib import Path as _Path
+
+    error_counts: dict[str, int] = {}
+    timeouts = 0
+    scores: list[str] = []
+    cell_results: list[str] = []
+
+    for cell in notebook_cells[round_start_cell:]:
+        cell_type = getattr(cell, "cell_type", None) or cell.get("cell_type")
+        if cell_type != "code":
+            continue
+        source = getattr(cell, "source", None) or cell.get("source", "")
+        outputs = getattr(cell, "outputs", None) or cell.get("outputs", [])
+
+        # Summarize this cell: first meaningful line of code + success/fail
+        first_line = ""
+        for line in source.split("\n"):
+            stripped = line.strip()
+            if stripped and not stripped.startswith(("#", "import", "from", "os.", "np.", "print")):
+                first_line = stripped[:80]
+                break
+        if not first_line:
+            first_line = source.split("\n")[0].strip()[:80] if source.strip() else "(empty)"
+
+        cell_ok = True
+        cell_text_parts: list[str] = []
+        for output in outputs:
+            out_type = getattr(output, "output_type", None) or output.get("output_type", "")
+            text = ""
+            if out_type == "error":
+                tb = getattr(output, "traceback", None) or output.get("traceback", [])
+                text = "\n".join(tb) if isinstance(tb, list) else str(tb)
+                cell_ok = False
+            elif out_type in ("stream", "execute_result"):
+                raw = getattr(output, "text", None) or output.get("text", "")
+                text = "".join(raw) if isinstance(raw, list) else str(raw)
+            cell_text_parts.append(text)
+
+            # Collect import errors
+            for line in text.split("\n"):
+                s = line.strip()
+                if s.startswith(("ImportError:", "ModuleNotFoundError:")):
+                    short = s[:120]
+                    error_counts[short] = error_counts.get(short, 0) + 1
+
+            if "cell timed out" in text.lower() or "timed out after" in text.lower():
+                timeouts += 1
+                cell_ok = False
+
+        cell_text = "\n".join(cell_text_parts)
+
+        # Extract numeric scores from output
+        for line in cell_text.split("\n"):
+            ll = line.lower().strip()
+            if any(m in ll for m in ["auc", "logloss", "log_loss", "log loss", "rmse", "mae", "f1", "accuracy", "score"]):
+                if any(c.isdigit() for c in line) and ("0." in line or "1." in line):
+                    scores.append(line.strip()[:120])
+
+        status = "OK" if cell_ok else "FAIL"
+        cell_results.append(f"  [{status}] {first_line}")
+
+    parts = []
+
+    # Cell execution log
+    if cell_results:
+        parts.append(f"Cells executed this round ({len(cell_results)}):")
+        parts.extend(cell_results[-15:])  # last 15 to avoid bloat
+
+    # Recurring errors
+    repeated = {k: v for k, v in error_counts.items() if v >= 2}
+    if repeated:
+        parts.append(
+            "⚠ RECURRING ERRORS (coding agent should use restart_kernel "
+            "if caused by corrupted import cache):"
+        )
+        for err, count in repeated.items():
+            parts.append(f"  [{count}x] {err}")
+
+    if timeouts > 0:
+        parts.append(f"⚠ {timeouts} cell(s) timed out this round.")
+
+    # Key scores (deduplicated, last 10)
+    if scores:
+        seen = []
+        for s in scores:
+            if s not in seen:
+                seen.append(s)
+        parts.append("Key scores observed:")
+        for s in seen[-10:]:
+            parts.append(f"  {s}")
+
+    # Artifact inventory
+    if artifacts_dir:
+        art_path = _Path(artifacts_dir)
+        if art_path.exists():
+            files = sorted(art_path.glob("*.npy"))
+            if files:
+                parts.append(f"Artifacts on disk: {len(files)} .npy files")
+                parts.append(f"  Latest: {', '.join(f.name for f in files[-5:])}")
+
+    return "\n".join(parts) if parts else ""
+
+
 def extract_xml_tag(text: str, tag: str) -> str | None:
     """Extract first <tag>...</tag> content."""
     pat = rf"<{tag}>\s*(.*?)\s*</{tag}>"

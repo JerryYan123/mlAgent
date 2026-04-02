@@ -20,6 +20,7 @@ from mlagent.utils import (
     ExperimentLog,
     PromptTracer,
     TokenTracker,
+    extract_round_diagnostics,
     format_parallel_summary,
     setup_logging,
     auto_select_gpu,
@@ -137,6 +138,9 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
             logger.info("-" * 60)
             snap_before_plan = tracker.snapshot()
             logger.info("Planning for %d agent(s)...", N)
+            # Give planner access to notebook for diagnostic tool calls
+            if jupyters:
+                planner.set_notebook_context(jupyters[0].nb.cells, agent_dirs[0])
             plans = planner.plan_parallel(rnd, last_summary, N)
             snap_after_plan = tracker.snapshot()
             for i, p in enumerate(plans):
@@ -211,6 +215,17 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                 best_round=best_round,
                 score_history=score_history,
             )
+
+            # Append notebook diagnostics so the planner sees actual errors/scores
+            for i in range(N):
+                nb_cells = jupyters[i].nb.cells
+                diag = extract_round_diagnostics(
+                    nb_cells,
+                    round_start_cell=max(0, len(nb_cells) - config.max_steps_per_round - 5),
+                    artifacts_dir=agent_dirs[i] / "artifacts",
+                )
+                if diag:
+                    last_summary += f"\n\n--- Agent {i} Diagnostics ---\n{diag}"
 
             combined_plan = "\n---\n".join(
                 f"Agent {i}: {plans[i][:500]}" for i in range(N)
