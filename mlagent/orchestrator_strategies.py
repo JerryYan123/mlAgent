@@ -14,6 +14,7 @@ from typing import Any, Optional
 from mlagent.coding_agent import CodingAgent, build_tools, _coding_system, _discover_artifacts
 from mlagent.competition_loader import load_competition
 from mlagent.config import AgentConfig
+from mlagent.eval_agent import setup_eval
 from mlagent.jupyter_executor import JupyterExecutor
 from mlagent.llm import ToolCallingLLM
 from mlagent.utils import (
@@ -280,8 +281,6 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
 
     last_summary: Optional[str] = None
     best_score: Optional[float] = None
-    best_round: int = 0
-    score_history: list[tuple[int, Optional[float]]] = []
     start = time.time()
 
     agent_dir = run_dir / "agent_0"
@@ -293,6 +292,19 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
         data_dir=competition.data_dir,
         jupyter_cfg=config.jupyter,
     )
+
+    # Set up evaluation kernel (independent, isolated)
+    eval_kernel = None
+    try:
+        eval_kernel = setup_eval(config, competition, run_dir, [agent_dir], tracker)
+    except Exception as e:
+        logger.warning("Eval setup failed: %s — proceeding without holdout", e)
+
+    def _eval_score_fn():
+        if eval_kernel and eval_kernel.ready:
+            pred = agent_dir / "holdout_predictions.csv"
+            return eval_kernel.score(pred)
+        return None
 
     try:
         for rnd in range(1, config.max_rounds + 1):
@@ -312,7 +324,7 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
             logger.info("Plan generated (board has %d entries)", len(board.entries))
 
             at = PromptTracer(agent_dir / "debug_prompts", enabled=bool(config.trace_prompts))
-            coder = CodingAgent(config.coding_llm, tracer=at, agent_idx=0, tracker=tracker)
+            coder = CodingAgent(config.coding_llm, tracer=at, agent_idx=0, tracker=tracker, eval_score_fn=_eval_score_fn)
             tag = "[Agent 0]"
 
             llm = ToolCallingLLM(config.coding_llm, tracker=tracker)
@@ -360,23 +372,34 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
                     round_num=rnd,
                 )
 
+            # No grading during run — agent must rely on OOF/CV scores
             sub_path = agent_dir / config.submission_file
-            nb_path = jupyter.get_notebook_path()
-            prev_best = best_score
-            best_score, grade = _grade_and_track_best(competition, sub_path, nb_path, run_dir, best_score)
-            if best_score != prev_best:
-                best_round = rnd
-            lower = getattr(competition, "is_lower_better", False)
+            if sub_path.exists():
+                shutil.copy(sub_path, run_dir / "best_submission.csv")
+                nb_path = jupyter.get_notebook_path()
+                shutil.copy(nb_path, run_dir / "best_experiment.ipynb")
 
-            round_score = getattr(grade, "score", None)
-            score_history.append((rnd, round_score))
+            last_summary = format_parallel_summary([summary], rnd)
 
-            last_summary = format_parallel_summary(
-                [summary], [grade], best_score, rnd,
-                is_lower_better=lower,
-                best_round=best_round,
-                score_history=score_history,
-            )
+            # Holdout score → visible to planner
+            holdout_score = None
+            if eval_kernel and eval_kernel.ready:
+                holdout_score = eval_kernel.score(agent_dir / "holdout_predictions.csv")
+                if holdout_score is not None:
+                    direction = "lower is better" if lower else "higher is better"
+                    last_summary += f"\n\nHoldout validation score: {holdout_score:.5f} ({direction})"
+                    logger.info("  Holdout score: %s", holdout_score)
+
+            # Hidden real grade → only in log
+            hidden_grade = None
+            sub_path = agent_dir / config.submission_file
+            if sub_path.exists():
+                try:
+                    grade = competition.grade(sub_path)
+                    hidden_grade = getattr(grade, "score", None)
+                    logger.info("  [HIDDEN] Real grade: %s", hidden_grade)
+                except Exception:
+                    pass
 
             # Append notebook diagnostics
             diag = extract_round_diagnostics(
@@ -399,9 +422,11 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
                 "  Tokens: plan %d/%d, code %d/%d (est $%.4f)",
                 plan_in, plan_out, code_in, code_out, round_cost or 0,
             )
-            exp_log.log_round(rnd, plan[:1000], last_summary, grade, extra={
+            exp_log.log_round(rnd, plan[:1000], last_summary, None, extra={
                 "strategy": "board_replan",
                 "board_entries": len(board.entries),
+                "holdout_score": holdout_score,
+                "hidden_grade": hidden_grade,
                 "plan_tokens": {"input": plan_in, "output": plan_out},
                 "code_tokens": {"input": code_in, "output": code_out},
                 "estimated_cost_usd": round_cost,
@@ -409,13 +434,20 @@ def _run_board_replan(config: AgentConfig) -> dict[str, Any]:
             board.save(run_dir / "experiment_board.json")
 
             elapsed_min = (time.time() - start) / 60
-            logger.info("Round %d done (%.1f min total). Best score: %s", rnd, elapsed_min, best_score)
+            logger.info("Round %d done (%.1f min total).", rnd, elapsed_min)
 
     finally:
         jupyter.shutdown()
+        if eval_kernel:
+            eval_kernel.shutdown()
+        # Grade only once at the end
         best_sub = run_dir / "best_submission.csv"
         if best_sub.exists():
-            shutil.copy(best_sub, run_dir / config.submission_file)
+            final_sub = run_dir / config.submission_file
+            shutil.copy(best_sub, final_sub)
+            grade = competition.grade(final_sub)
+            best_score = getattr(grade, "score", None)
+            logger.info("Final grade: score=%s, valid=%s", best_score, getattr(grade, "valid_submission", None))
         board.save(run_dir / "experiment_board.json")
 
     total_min = (time.time() - start) / 60
@@ -577,8 +609,7 @@ def _run_codex_todo(config: AgentConfig) -> dict[str, Any]:
             sub_path = agent_dir / config.submission_file
             nb_path = jupyter.get_notebook_path()
             best_score, grade = _grade_and_track_best(competition, sub_path, nb_path, run_dir, best_score)
-            lower = getattr(competition, "is_lower_better", False)
-            last_summary = format_parallel_summary([summary], [grade], best_score, rnd, is_lower_better=lower)
+            last_summary = format_parallel_summary([summary], rnd)
 
             snap_after_code = tracker.snapshot()
             plan_in = snap_after_plan[0] - snap_before_plan[0]

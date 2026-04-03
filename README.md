@@ -30,16 +30,17 @@ actmlagent
 nohup python -u scripts/run.py --competition spooky-author-identification > mlagent_run.log 2>&1 &
 tail -f mlagent_run.log
 ```
-nohup python -u scripts/run.py max_rounds=30 > spooky_baseline_run.log 2>&1 &
+nohup python -u scripts/run.py max_rounds=5 > spooky_agent_test.log 2>&1 &
+nohup python -u scripts/run.py --competition jigsaw-toxic-comment-classification-challenge max_rounds=5 > jigsaw_agent_test.log 2>&1 &
+nohup python -u scripts/run.py --competition random-acts-of-pizza max_rounds=5 > pizza_agent_test.log 2>&1 &
+
 
 nohup python -u scripts/run.py --config configs/board_replan.yaml max_rounds=30 > spooky_board_run.log 2>&1 &
 
-nohup python -u scripts/run.py --competition jigsaw-toxic-comment-classification-challenge max_rounds=30 > jigsaw_baseline_run.log 2>&1 &
 
 nohup python -u scripts/run.py --config configs/board_replan.yaml --competition jigsaw-toxic-comment-classification-challenge max_rounds=30 > jigsaw_board_run.log 2>&1 &
 
 
-nohup python -u scripts/run.py --competition random-acts-of-pizza max_rounds=40 > pizza_baseline_run.log 2>&1 &
 
 nohup python -u scripts/run.py --config configs/board_replan.yaml --competition random-acts-of-pizza max_rounds=40 > pizza_board_run.log 2>&1 &
 

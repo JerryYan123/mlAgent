@@ -93,6 +93,19 @@ def build_tools(submission_name: str) -> list[dict[str, Any]]:
                 "parameters": {"type": "object", "properties": {}},
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "score_on_holdout",
+                "description": (
+                    "Score your predictions on a hidden holdout set. First, predict on "
+                    "input/holdout.csv (which has no labels) and save predictions to "
+                    "holdout_predictions.csv (same format as submission). Then call this "
+                    "tool to get an honest validation score. More reliable than your own CV/OOF."
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
     ]
 
 
@@ -115,50 +128,62 @@ def _discover_artifacts(work_dir: Path) -> str:
     return "\n".join(lines)
 
 
-def _data_profile(work_dir: Path) -> str:
-    """Scan ./input/ and return factual data statistics."""
+def _data_profile_for_dir(input_dir: Path) -> str:
+    """Scan a data directory and return file info with train/test column notes."""
     try:
         import pandas as pd
         import json as _json
 
-        input_dir = work_dir / "input"
         if not input_dir.exists():
             return ""
 
         parts = []
-        for f in sorted(input_dir.rglob("*")):
-            if f.is_dir():
+        train_cols: set = set()
+        test_cols: set = set()
+
+        for f in sorted(input_dir.iterdir()):
+            if f.is_dir() or f.suffix not in (".csv", ".json"):
                 continue
-            name = str(f.relative_to(input_dir))
+            name = f.name
             try:
                 if f.suffix == ".csv":
                     df = pd.read_csv(f, nrows=200)
-                    # Count rows via chunked iteration — constant memory
                     try:
-                        nrows = sum(chunk.shape[0] for chunk in pd.read_csv(f, usecols=[0], chunksize=50000))
+                        nrows = sum(c.shape[0] for c in pd.read_csv(f, usecols=[0], chunksize=50000))
                     except Exception:
-                        nrows = sum(1 for _ in open(f, encoding="utf-8", errors="ignore")) - 1
-                    cols_info = []
-                    for c in df.columns:
-                        if df[c].dtype == object:
-                            avg_len = int(df[c].dropna().str.len().mean()) if len(df[c].dropna()) > 0 else 0
-                            cols_info.append(f"{c}(text, avg {avg_len} chars)")
-                        else:
-                            cols_info.append(f"{c}({df[c].dtype})")
-                    parts.append(f"{name}: {nrows} rows, {df.shape[1]} cols — {', '.join(cols_info[:10])}")
+                        nrows = "?"
+                    cols = ", ".join(f"{c}({'text' if df[c].dtype == object else df[c].dtype})" for c in df.columns[:10])
+                    parts.append(f"{name}: {nrows} rows, {df.shape[1]} cols — {cols}")
+                    if "train" in name.lower():
+                        train_cols = set(df.columns)
+                    elif "test" in name.lower() and "sample" not in name.lower():
+                        test_cols = set(df.columns)
                 elif f.suffix == ".json":
-                    with open(f, encoding="utf-8") as fh:
+                    with open(f) as fh:
                         data = _json.load(fh)
                     if isinstance(data, list):
                         parts.append(f"{name}: {len(data)} records (JSON)")
-                    elif isinstance(data, dict):
-                        parts.append(f"{name}: dict with {len(data)} keys")
+                        if data and isinstance(data[0], dict):
+                            if "train" in name.lower():
+                                train_cols = set(data[0].keys())
+                            elif "test" in name.lower():
+                                test_cols = set(data[0].keys())
             except Exception:
                 continue
+
+        if train_cols and test_cols:
+            train_only = train_cols - test_cols
+            if train_only:
+                parts.append(f"Note: train has {len(train_only)} columns not in test: {', '.join(sorted(train_only)[:8])}")
 
         return "Data files:\n" + "\n".join(f"  {p}" for p in parts) if parts else ""
     except Exception:
         return ""
+
+
+def _data_profile(work_dir: Path) -> str:
+    """Scan ./input/ and return data file info."""
+    return _data_profile_for_dir(work_dir / "input")
 
 
 def _gpu_hint(work_dir: Path) -> str:
@@ -219,19 +244,14 @@ Plan from planning agent:
 
 You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, read_file, restart_kernel.
 
-## Following the Plan
-- The plan above is your primary objective for this round. Execute it faithfully.
-- If the plan asks you to try a specific model family (e.g. transformer, tree-based),
-  you MUST attempt it — do not skip it in favor of something you're more comfortable with.
-- You may adjust implementation details (hyperparameters, exact features) based on what
-  you observe, but do not substitute the plan's core goals with a different approach.
-- If a planned approach fails (e.g. package error, timeout), fix the error and retry
-  before falling back to simpler alternatives.
-
 ## Workflow
 - Start by loading and briefly exploring the data.
 - Build a working baseline that produces a valid {submission_name} as early as possible.
-- Once you have a valid submission, work on the plan's goals to improve the score.
+- Once you have a valid submission, iterate to improve: try the plan's suggestions,
+  but also explore other promising approaches if you have steps remaining.
+- Before finishing, also predict on input/holdout.csv (same features, no labels) and
+  save as holdout_predictions.csv (same format as {submission_name}). This is used
+  for honest validation by an independent evaluator.
 - Use check_submission to verify your output file before finishing.
 
 ## Package Installation
@@ -328,11 +348,13 @@ class CodingAgent:
         tracer: Optional[PromptTracer] = None,
         agent_idx: int = 0,
         tracker: Optional[TokenTracker] = None,
+        eval_score_fn: Optional[Any] = None,
     ) -> None:
         self.coding_cfg = coding_cfg
         self.tracer = tracer
         self.agent_idx = agent_idx
         self.tracker = tracker
+        self.eval_score_fn = eval_score_fn
         self._tag = f"[Agent {agent_idx}]"
 
     def run_round(
@@ -508,4 +530,15 @@ class CodingAgent:
             logger.info("Restarting kernel on agent request...")
             jupyter.restart_kernel()
             return json.dumps({"success": True, "message": "Kernel restarted. All variables cleared. Files on disk (artifacts, submission) are preserved."})
+        if name == "score_on_holdout":
+            if self.eval_score_fn is None:
+                return json.dumps({"score": None, "error": "Holdout scoring not available."})
+            # Check that holdout_predictions.csv exists
+            pred_path = work_dir / "holdout_predictions.csv"
+            if not pred_path.exists():
+                return json.dumps({"score": None, "error": "holdout_predictions.csv not found. First predict on input/holdout.csv and save as holdout_predictions.csv."})
+            score = self.eval_score_fn()
+            if score is not None:
+                return json.dumps({"score": score})
+            return json.dumps({"score": None, "error": "Scoring failed. Check holdout_predictions.csv format matches sample_submission.csv."})
         return f"unknown tool {name}"

@@ -54,6 +54,9 @@ class AgentConfig:
     trace_prompts: bool = True
     trace_prompts_dir: Optional[str] = None
 
+    enable_holdout: bool = True
+    holdout_fraction: float = 0.15
+
 
 def load_config(config_path: str | Path, overrides: list[str] | None = None) -> AgentConfig:
     schema = OmegaConf.structured(AgentConfig)

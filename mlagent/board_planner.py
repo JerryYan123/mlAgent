@@ -52,12 +52,14 @@ Round 1 is special: the board is empty and you must build the initial blueprint.
 - Give the coding agent 2-4 concrete goals for the current round.
 
 ## Strategy Progression
-- Early rounds: diverse base models, each saving OOF predictions to ./artifacts/.
-- Mid rounds: if GPU is available and the task involves text/images, plan a round for
-  fine-tuning a pretrained model (BERT, ResNet, etc.) — this often gives a large boost.
-  Also tune top traditional performers and try different feature engineering.
-- Late rounds: stacking (meta-learner on OOF features). Apply calibration only if
-  the metric is probability-based (log-loss, Brier); skip it for ranking metrics (AUC).
+- Every round should aim for diversity: include BOTH traditional ML AND deep learning
+  tasks in the same plan when possible. Don't wait for "later rounds" to try DL.
+- From round 1: if a GPU is available and the task involves text/images, include a
+  pretrained model fine-tune alongside traditional baselines.
+- Each model should save OOF predictions to ./artifacts/. Once 3+ diverse OOF sets
+  exist, include stacking in the plan alongside new models.
+- Apply calibration only if the metric is probability-based (log-loss, Brier);
+  skip it for ranking metrics (AUC).
 - Each round MUST produce a valid submission.
 - When budget is low, refine best known approach rather than exploring.
 
@@ -114,6 +116,13 @@ class BoardPlanningAgent:
         metric_hint = f"lower is better: {lower}" if lower else "higher is better"
         self.board.is_lower_better = bool(lower)
 
+        from mlagent.coding_agent import _data_profile_for_dir
+        data_dir = getattr(competition, "data_dir", None)
+        if data_dir:
+            data_profile = _data_profile_for_dir(Path(data_dir))
+            if data_profile:
+                preview = preview + "\n\n" + data_profile
+
         sys_prompt = _board_system(desc, preview, metric_hint)
         self.llm.messages = [{"role": "system", "content": sys_prompt}]
 
@@ -168,11 +177,14 @@ class BoardPlanningAgent:
                 f"{budget}\n\n"
                 f"## Experiment Board\n{board_str}\n\n"
                 f"This is round 1 — the board is empty.\n\n"
-                f"First, build the initial strategy board: analyze the task and sketch "
-                f"3-5 approach branches using [BOARD:branch] tags. These branches form "
-                f"the blueprint for the entire experiment.\n\n"
-                f"Then, provide a concrete plan for the coding agent for this round "
-                f"(typically: explore data, build 1-2 diverse baselines, save OOF)."
+                f"Before planning, use your tools to inspect the data:\n"
+                f"- Use read_file to check what data files exist and their structure.\n"
+                f"- If there are multiple versions of the same data (e.g. CSV and JSON), "
+                f"compare them and recommend which one the coding agent should use.\n"
+                f"- Note any train/test column mismatches.\n\n"
+                f"Then build the initial strategy board: analyze the task and sketch "
+                f"3-5 approach branches using [BOARD:branch] tags.\n\n"
+                f"Include a ## Data Notes section specifying which files to use."
             )
         else:
             prompt = (

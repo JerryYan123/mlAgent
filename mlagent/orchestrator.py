@@ -1,11 +1,11 @@
-"""Planning <-> Coding round loop with support for 1..N parallel coding agents."""
+"""Task-based orchestrator: planner outputs tasks, each runs as a separate coding agent call."""
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +14,7 @@ from typing import Any, Optional
 from mlagent.coding_agent import CodingAgent
 from mlagent.competition_loader import load_competition
 from mlagent.config import AgentConfig
+from mlagent.eval_agent import setup_eval
 from mlagent.jupyter_executor import JupyterExecutor
 from mlagent.planning_agent import PlanningAgent
 from mlagent.utils import (
@@ -37,32 +38,18 @@ def _ensure_cuda_visible(cfg) -> None:
         os.environ["CUDA_VISIBLE_DEVICES"] = g.strip()
 
 
-def _run_single_agent(
-    agent_idx: int,
-    config: AgentConfig,
-    plan: str,
-    competition: Any,
-    jupyter: JupyterExecutor,
-    agent_dir: Path,
-    tracer: PromptTracer,
-    results: list[Optional[str]],
-    tracker: Optional[TokenTracker] = None,
-) -> None:
-    """Run one CodingAgent in its own workspace. Thread-safe."""
-    try:
-        coder = CodingAgent(config.coding_llm, tracer=tracer, agent_idx=agent_idx, tracker=tracker)
-        summary = coder.run_round(
-            plan=plan,
-            competition=competition,
-            jupyter=jupyter,
-            work_dir=agent_dir,
-            submission_name=config.submission_file,
-            max_steps=config.max_steps_per_round,
-        )
-        results[agent_idx] = summary
-    except Exception:
-        logger.exception("Agent %d crashed", agent_idx)
-        results[agent_idx] = f"Agent {agent_idx} crashed with an exception."
+def _parse_tasks(plan: str) -> list[str]:
+    """Split a plan into tasks by ### Task headers. Falls back to single task."""
+    pattern = r"###\s*Task\s*\d+"
+    splits = list(re.finditer(pattern, plan, re.IGNORECASE))
+    if len(splits) < 2:
+        return [plan]
+    tasks = []
+    for idx, match in enumerate(splits):
+        start = match.start()
+        end = splits[idx + 1].start() if idx + 1 < len(splits) else len(plan)
+        tasks.append(plan[start:end].strip())
+    return tasks
 
 
 def run_experiment(config: AgentConfig) -> dict[str, Any]:
@@ -73,23 +60,17 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
     run_dir = Path(config.working_dir) / f"run_{ts}_{config.competition_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    planner_trace_dir = None
-    if config.trace_prompts:
-        planner_trace_dir = (
-            Path(config.trace_prompts_dir)
-            if config.trace_prompts_dir
-            else run_dir / "debug_prompts"
-        )
+    planner_trace_dir = run_dir / "debug_prompts" if config.trace_prompts else None
     planner_tracer = PromptTracer(planner_trace_dir, enabled=bool(config.trace_prompts))
 
     logger.info("=" * 60)
     logger.info("Loading competition: %s", config.competition_id)
     competition = load_competition(config.competition_id)
+    lower = getattr(competition, "is_lower_better", False)
 
-    N = config.num_coding_agents
     logger.info(
-        "Config: %d round(s), %d step(s)/round, %d agent(s)/round",
-        config.max_rounds, config.max_steps_per_round, N,
+        "Config: %d round(s), %d step(s)/round",
+        config.max_rounds, config.max_steps_per_round,
     )
 
     tracker = TokenTracker()
@@ -98,30 +79,33 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
 
     last_summary: Optional[str] = None
     best_score: Optional[float] = None
-    best_round: int = 0
-    score_history: list[tuple[int, Optional[float]]] = []
     start = time.time()
 
-    # Create persistent kernels — survive across rounds so imports/data persist
-    agent_dirs: list[Path] = []
-    jupyters: list[JupyterExecutor] = []
-    agent_tracers: list[PromptTracer] = []
+    # Persistent kernel + agent workspace
+    agent_dir = run_dir / "agent_0"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    jupyter = JupyterExecutor(
+        work_dir=agent_dir,
+        data_dir=competition.data_dir,
+        jupyter_cfg=config.jupyter,
+    )
+    agent_tracer = PromptTracer(
+        agent_dir / "debug_prompts" if config.trace_prompts else None,
+        enabled=bool(config.trace_prompts),
+    )
 
-    for i in range(N):
-        agent_dir = run_dir / f"agent_{i}"
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        jup = JupyterExecutor(
-            work_dir=agent_dir,
-            data_dir=competition.data_dir,
-            jupyter_cfg=config.jupyter,
-        )
-        at_dir = agent_dir / "debug_prompts" if config.trace_prompts else None
-        at = PromptTracer(at_dir, enabled=bool(config.trace_prompts))
-        agent_dirs.append(agent_dir)
-        jupyters.append(jup)
-        agent_tracers.append(at)
+    # Eval kernel (isolated)
+    eval_kernel = None
+    try:
+        eval_kernel = setup_eval(config, competition, run_dir, [agent_dir], tracker)
+    except Exception as e:
+        logger.warning("Eval setup failed: %s — proceeding without holdout", e)
 
-    all_jupyters = jupyters
+    def _eval_score_fn():
+        if eval_kernel and eval_kernel.ready:
+            pred = agent_dir / "holdout_predictions.csv"
+            return eval_kernel.score(pred)
+        return None
 
     try:
         for rnd in range(1, config.max_rounds + 1):
@@ -131,105 +115,96 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
 
             elapsed_min = (time.time() - start) / 60
             logger.info("=" * 60)
-            logger.info(
-                "ROUND %d/%d  (elapsed %.1f min, best_score=%s)",
-                rnd, config.max_rounds, elapsed_min, best_score,
-            )
+            logger.info("ROUND %d/%d  (elapsed %.1f min)", rnd, config.max_rounds, elapsed_min)
             logger.info("-" * 60)
+
             snap_before_plan = tracker.snapshot()
-            logger.info("Planning for %d agent(s)...", N)
-            # Give planner access to notebook for diagnostic tool calls
-            if jupyters:
-                planner.set_notebook_context(jupyters[0].nb.cells, agent_dirs[0])
-            plans = planner.plan_parallel(rnd, last_summary, N)
+
+            # Plan
+            planner.set_notebook_context(jupyter.nb.cells, agent_dir)
+            plan = planner.plan(rnd, last_summary)
             snap_after_plan = tracker.snapshot()
-            for i, p in enumerate(plans):
-                first_line = p.strip().split("\n")[0][:120]
-                logger.info("  Agent %d plan: %s", i, first_line)
 
-            results: list[Optional[str]] = [None] * N
+            # Parse plan into tasks
+            tasks = _parse_tasks(plan)
+            logger.info("Plan has %d task(s)", len(tasks))
+            steps_per_task = max(5, config.max_steps_per_round // max(len(tasks), 1))
 
-            if N == 1:
-                _run_single_agent(
-                    0, config, plans[0], competition,
-                    jupyters[0], agent_dirs[0], agent_tracers[0], results,
+            # Run each task as a separate coding agent call
+            task_results = []
+            for task_idx, task_plan in enumerate(tasks):
+                task_label = task_plan.split("\n")[0][:80]
+                logger.info("  Task %d/%d: %s (%d steps)", task_idx + 1, len(tasks), task_label, steps_per_task)
+
+                coder = CodingAgent(
+                    config.coding_llm,
+                    tracer=agent_tracer,
+                    agent_idx=0,
                     tracker=tracker,
+                    eval_score_fn=_eval_score_fn,
                 )
-            else:
-                threads: list[threading.Thread] = []
-                for i in range(N):
-                    t = threading.Thread(
-                        target=_run_single_agent,
-                        args=(
-                            i, config, plans[i], competition,
-                            jupyters[i], agent_dirs[i], agent_tracers[i], results,
-                            tracker,
-                        ),
-                        name=f"agent-{i}",
-                    )
-                    threads.append(t)
-                    t.start()
-                for t in threads:
-                    t.join()
+                summary = coder.run_round(
+                    plan=task_plan,
+                    competition=competition,
+                    jupyter=jupyter,
+                    work_dir=agent_dir,
+                    submission_name=config.submission_file,
+                    max_steps=steps_per_task,
+                )
+
+                # Score after each task
+                holdout_score = None
+                if eval_kernel and eval_kernel.ready:
+                    pred_path = agent_dir / "holdout_predictions.csv"
+                    holdout_score = eval_kernel.score(pred_path)
+
+                task_results.append({
+                    "task": task_label,
+                    "summary": summary,
+                    "holdout_score": holdout_score,
+                })
+
+                score_str = f", holdout={holdout_score:.5f}" if holdout_score is not None else ""
+                logger.info("  Task %d done%s", task_idx + 1, score_str)
 
             logger.info("-" * 60)
-            logger.info("Grading round %d results...", rnd)
-            grades = []
-            lower = getattr(competition, "is_lower_better", False)
-            for i in range(N):
-                sub_path = agent_dirs[i] / config.submission_file
-                grade = competition.grade(sub_path)
-                grades.append(grade)
 
-                score_val = getattr(grade, "score", None)
-                valid = getattr(grade, "valid_submission", False)
-                logger.info(
-                    "  Agent %d: score=%s, valid=%s",
-                    i, score_val, valid,
-                )
+            # Save submission
+            sub_path = agent_dir / config.submission_file
+            if sub_path.exists():
+                shutil.copy(sub_path, run_dir / "best_submission.csv")
+                shutil.copy(jupyter.get_notebook_path(), run_dir / "best_experiment.ipynb")
 
-                if valid and score_val is not None:
-                    s = float(score_val)
-                    is_better = False
-                    if best_score is None:
-                        is_better = True
-                    else:
-                        is_better = s < best_score if lower else s > best_score
+            # Build round summary for planner
+            summary_parts = [f"=== After round {rnd} ==="]
+            for tr in task_results:
+                summary_parts.append(f"--- {tr['task']} ---\n{tr['summary']}")
+                if tr["holdout_score"] is not None:
+                    direction = "lower is better" if lower else "higher is better"
+                    summary_parts.append(f"Holdout score after this task: {tr['holdout_score']:.5f} ({direction})")
+            last_summary = "\n\n".join(summary_parts)
 
-                    if is_better:
-                        best_score = s
-                        best_round = rnd
-                        shutil.copy(sub_path, run_dir / "best_submission.csv")
-                        nb_path = jupyters[i].get_notebook_path()
-                        shutil.copy(nb_path, run_dir / "best_experiment.ipynb")
-                        logger.info("  ★ New best score: %s (agent %d)", best_score, i)
+            # Hidden real grade (only in log)
+            hidden_grade = None
+            if sub_path.exists():
+                try:
+                    grade = competition.grade(sub_path)
+                    hidden_grade = getattr(grade, "score", None)
+                    logger.info("  [HIDDEN] Real grade: %s", hidden_grade)
+                except Exception:
+                    pass
 
-            # Track score for degradation detection
-            round_score = getattr(grades[0], "score", None)
-            score_history.append((rnd, round_score))
-
-            summaries = [r or f"Agent {i} produced no summary." for i, r in enumerate(results)]
-            last_summary = format_parallel_summary(
-                summaries, grades, best_score, rnd,
-                is_lower_better=lower,
-                best_round=best_round,
-                score_history=score_history,
+            # Diagnostics
+            nb_cells = jupyter.nb.cells
+            diag = extract_round_diagnostics(
+                nb_cells,
+                round_start_cell=max(0, len(nb_cells) - config.max_steps_per_round - 5),
+                artifacts_dir=agent_dir / "artifacts",
             )
+            if diag:
+                last_summary += f"\n\n--- Diagnostics ---\n{diag}"
 
-            # Append notebook diagnostics so the planner sees actual errors/scores
-            for i in range(N):
-                nb_cells = jupyters[i].nb.cells
-                diag = extract_round_diagnostics(
-                    nb_cells,
-                    round_start_cell=max(0, len(nb_cells) - config.max_steps_per_round - 5),
-                    artifacts_dir=agent_dirs[i] / "artifacts",
-                )
-                if diag:
-                    last_summary += f"\n\n--- Agent {i} Diagnostics ---\n{diag}"
-
-            combined_plan = "\n---\n".join(
-                f"Agent {i}: {plans[i][:500]}" for i in range(N)
-            )
+            # Log
             snap_after_code = tracker.snapshot()
             plan_in = snap_after_plan[0] - snap_before_plan[0]
             plan_out = snap_after_plan[1] - snap_before_plan[1]
@@ -238,51 +213,40 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
             round_cost = TokenTracker.estimate_cost(
                 plan_in + code_in, plan_out + code_out, config.coding_llm.model_name,
             )
-            logger.info(
-                "  Tokens: plan %d/%d, code %d/%d (est $%.4f)",
-                plan_in, plan_out, code_in, code_out, round_cost or 0,
-            )
-            exp_log.log_round(
-                rnd,
-                combined_plan,
-                last_summary,
-                grades[0],
-                extra={
-                    "num_agents": N,
-                    "all_grades": [
-                        {
-                            "agent": i,
-                            "score": getattr(g, "score", None),
-                            "valid": getattr(g, "valid_submission", None),
-                        }
-                        for i, g in enumerate(grades)
-                    ],
-                    "plan_tokens": {"input": plan_in, "output": plan_out},
-                    "code_tokens": {"input": code_in, "output": code_out},
-                    "estimated_cost_usd": round_cost,
-                },
-            )
+            logger.info("  Tokens: plan %d/%d, code %d/%d (est $%.4f)",
+                        plan_in, plan_out, code_in, code_out, round_cost or 0)
+
+            exp_log.log_round(rnd, plan[:1000], last_summary, None, extra={
+                "num_tasks": len(tasks),
+                "task_holdout_scores": [tr["holdout_score"] for tr in task_results],
+                "hidden_grade": hidden_grade,
+                "plan_tokens": {"input": plan_in, "output": plan_out},
+                "code_tokens": {"input": code_in, "output": code_out},
+                "estimated_cost_usd": round_cost,
+            })
+
             elapsed_min = (time.time() - start) / 60
-            logger.info(
-                "Round %d done (%.1f min total). Best score: %s",
-                rnd, elapsed_min, best_score,
-            )
+            logger.info("Round %d done (%.1f min total).", rnd, elapsed_min)
 
     finally:
+        # Final grade
         best_sub = run_dir / "best_submission.csv"
         if best_sub.exists():
             final_sub = run_dir / config.submission_file
             shutil.copy(best_sub, final_sub)
-        for jup in all_jupyters:
-            jup.shutdown()
+            grade = competition.grade(final_sub)
+            best_score = getattr(grade, "score", None)
+            logger.info("Final grade: score=%s, valid=%s",
+                        best_score, getattr(grade, "valid_submission", None))
+            exp_log.log_round(0, "", "", grade, extra={"final_grade": True})
+        jupyter.shutdown()
+        if eval_kernel:
+            eval_kernel.shutdown()
 
     total_min = (time.time() - start) / 60
     logger.info("=" * 60)
-    logger.info("DONE  total=%.1f min  best_score=%s  run_dir=%s", total_min, best_score, run_dir)
+    logger.info("DONE  total=%.1f min  best_score=%s  run_dir=%s",
+                total_min, best_score, run_dir)
     logger.info("=" * 60)
 
-    return {
-        "run_dir": str(run_dir),
-        "best_score": best_score,
-        "last_summary": last_summary,
-    }
+    return {"run_dir": str(run_dir), "best_score": best_score, "last_summary": last_summary}

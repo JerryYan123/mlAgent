@@ -168,21 +168,26 @@ on the coding agent's summary, which may be incomplete or misleading. Look at ac
 errors, actual scores, and actual artifacts before planning the next round.
 
 ## How to Plan Each Round
-- Each round, give the coding agent a clear goal with 2-4 concrete tasks.
-- The agent can accomplish multiple things per round (e.g. build 2 models + stack them).
-- Focus on what models/features to try, not on debugging or error handling.
-- If last round failed, suggest a simpler approach — but trust the agent to handle bugs.
-
-## Recommended Progression Across Rounds
-- Early rounds: build diverse base models (linear, tree, NB). For each model, tell
-  the agent to save K-fold OOF (out-of-fold) train predictions and test predictions
-  to ./artifacts/ as .npy. A single round can include multiple diverse models.
-- Mid rounds: if a GPU is available and the task involves text or images, dedicate
-  a round to fine-tuning a pretrained model (e.g. bert-base-uncased, distilbert for
-  NLP; resnet, efficientnet for vision). This often provides a large score jump over
-  traditional ML. Save OOF predictions for stacking with other models.
-- Later rounds: once 3+ diverse OOF sets exist in ./artifacts/, build a stacking
-  meta-learner. Stacking can be done in the same round as building new base models.
+- Structure your plan as separate tasks using ### Task N headers.
+  Each task will be executed independently by a separate coding agent.
+  The coding agent for each task ONLY sees that task's instructions.
+  Example:
+    ### Task 1: TF-IDF + Logistic Regression baseline
+    Build a TF-IDF model with word and char n-grams, combine with numeric features...
+    ### Task 2: Fine-tune DistilBERT
+    Fine-tune distilbert-base-uncased on the text with 3-fold CV...
+    ### Task 3: Stack and submit
+    Load OOF artifacts from Task 1 and 2, build a meta-learner...
+- Each task should be self-contained: the coding agent can access saved artifacts
+  from previous tasks (via ./artifacts/*.npy) and the shared Jupyter kernel state.
+- After each task, the holdout score is automatically measured.
+- Aim for 2-4 tasks per round, each exploring a different approach.
+- From round 1: if a GPU is available and the task involves text or images, include
+  a pretrained model fine-tune (e.g. distilbert, roberta-base for NLP; resnet for
+  vision) alongside traditional baselines. Don't wait for "later rounds".
+- For each model, tell the agent to save K-fold OOF train predictions and test
+  predictions to ./artifacts/ as .npy.
+- Once 3+ diverse OOF sets exist, include stacking in the plan alongside new models.
 - Final rounds: refine the best approach. Small tuning, not major new experiments.
 
 ## Model Combination (Stacking)
@@ -263,6 +268,14 @@ class PlanningAgent:
         lower = getattr(competition, "is_lower_better", False)
         metric_hint = f"lower is better: {lower}" if lower else "higher is better"
 
+        # Add data profile with column analysis and train/test mismatch warnings
+        from mlagent.coding_agent import _data_profile_for_dir
+        data_dir = getattr(competition, "data_dir", None)
+        if data_dir:
+            data_profile = _data_profile_for_dir(Path(data_dir))
+            if data_profile:
+                preview = preview + "\n\n" + data_profile
+
         sys_prompt = _planning_system(desc, preview, metric_hint)
         self.llm.messages = [{"role": "system", "content": sys_prompt}]
 
@@ -323,14 +336,22 @@ class PlanningAgent:
             self.llm.append_user(
                 f"{budget}\n\n"
                 f"Round 1: no prior coding results.\n\n"
-                f"First, create an overall strategy for all {self.max_rounds} rounds — "
-                f"a roadmap of what to try and in what order (baseline, improvements, advanced).\n\n"
-                f"Then, provide the detailed plan for Round 1.\n\n"
+                f"Before planning, use your tools to inspect the data:\n"
+                f"- Use read_file to check what data files exist and their structure.\n"
+                f"- If there are multiple versions of the same data (e.g. CSV and JSON), "
+                f"compare them and recommend which one the coding agent should use.\n"
+                f"- Note any train/test column mismatches.\n\n"
+                f"Then create an overall strategy and a detailed plan for Round 1.\n\n"
                 f"Format:\n"
+                f"## Data Notes\n(which files to use, any column issues)\n\n"
                 f"## Overall Strategy\n(roadmap for {self.max_rounds} rounds)\n\n"
-                f"## Round 1 Plan\n(specific actions for the coding agent this round)"
+                f"## Round 1 Plan\n"
+                f"Use ### Task N headers for each task. Example:\n"
+                f"### Task 1: Build TF-IDF + numeric baseline\n"
+                f"### Task 2: Fine-tune transformer\n"
+                f"### Task 3: Stack and compare"
             )
-            reply = self._run_tool_loop(max_tool_calls=3)
+            reply = self._run_tool_loop(max_tool_calls=5)
         else:
             # Step 1: Diagnose with tools — planner can inspect notebook cells
             self.llm.append_user(
@@ -339,7 +360,7 @@ class PlanningAgent:
                 f"Before planning, diagnose what happened. Use your tools "
                 f"(read_notebook_cell, list_artifacts, read_file) to inspect actual "
                 f"errors, outputs, and scores if the summary is unclear.\n\n"
-                f"Then provide the plan for round {round_num}."
+                f"Then provide the plan for round {round_num} using ### Task N headers."
             )
             reply = self._run_tool_loop(max_tool_calls=5)
 

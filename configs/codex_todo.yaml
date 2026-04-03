@@ -40,3 +40,6 @@ max_steps_per_round: 20
 total_time_limit: 43200
 
 trace_prompts: true
+
+enable_holdout: true
+holdout_fraction: 0.15
