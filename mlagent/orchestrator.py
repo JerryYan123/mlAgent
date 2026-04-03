@@ -128,7 +128,7 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
             # Parse plan into tasks
             tasks = _parse_tasks(plan)
             logger.info("Plan has %d task(s)", len(tasks))
-            steps_per_task = max(5, config.max_steps_per_round // max(len(tasks), 1))
+            steps_per_task = config.max_steps_per_round
 
             # Run each task as a separate coding agent call
             task_results = []

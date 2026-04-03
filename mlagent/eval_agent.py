@@ -170,10 +170,9 @@ class EvalKernel:
         self._jupyter: Optional[JupyterExecutor] = None
         self._jupyter_cfg = jupyter_cfg
 
-    def setup(self, eval_code: str) -> bool:
-        """Copy data, run eval code, verify it works."""
+    def prepare_data(self) -> bool:
+        """Copy and clean competition data. Must be called before setup()."""
         try:
-            # Step 1: Copy competition data (so we can modify train without affecting original)
             if self.eval_data_dir.exists():
                 shutil.rmtree(self.eval_data_dir)
             shutil.copytree(self.data_dir, self.eval_data_dir)
@@ -201,6 +200,30 @@ class EvalKernel:
                 if removed:
                     logger.info("Eval: removed %d duplicate train files: %s", len(removed), removed[:5])
 
+            # Step 1c: Convert JSON data files to CSV for easier agent consumption
+            import pandas as pd
+            for json_file in list(self.eval_data_dir.glob("*.json")):
+                try:
+                    import json as _json
+                    with open(json_file) as f:
+                        data = _json.load(f)
+                    if isinstance(data, list) and data:
+                        df = pd.DataFrame(data)
+                        csv_path = json_file.with_suffix(".csv")
+                        df.to_csv(csv_path, index=False)
+                        json_file.unlink()  # remove the JSON
+                        logger.info("Eval: converted %s → %s (%d rows)", json_file.name, csv_path.name, len(df))
+                except Exception as e:
+                    logger.warning("Eval: failed to convert %s: %s", json_file.name, e)
+
+            return True
+        except Exception as e:
+            logger.error("Eval data preparation failed: %s", e)
+            return False
+
+    def setup(self, eval_code: str) -> bool:
+        """Create eval kernel and run eval code. Call prepare_data() first."""
+        try:
             # Step 2: Create eval kernel
             self.eval_work_dir.mkdir(parents=True, exist_ok=True)
             # Symlink input to our copy
@@ -380,10 +403,16 @@ def setup_eval(
     agent = EvalAgent(eval_llm_cfg, tracker=tracker)
     kernel = EvalKernel(run_dir, competition.data_dir, config.jupyter)
 
-    # Try LLM-generated eval code up to 3 times
+    # Prepare data first (copy + clean + JSON→CSV), then generate eval code
+    if not kernel.prepare_data():
+        logger.warning("Eval: data preparation failed")
+        return None
+
+    # LLM sees the prepared data (CSV files, not JSON)
+    eval_data_dir = kernel.eval_data_dir
     last_error = ""
     for attempt in range(3):
-        code = agent.generate_eval_code(competition, competition.data_dir, prev_error=last_error)
+        code = agent.generate_eval_code(competition, eval_data_dir, prev_error=last_error)
         if not code:
             last_error = "Code generation returned empty response."
             logger.warning("Eval: code generation returned None (attempt %d)", attempt + 1)
@@ -429,6 +458,18 @@ def setup_eval(
                         continue
                     if f.suffix in (".csv", ".json", ".jsonl", ".parquet", ".pkl"):
                         f.unlink()
+            # Convert JSON → CSV
+            import pandas as pd
+            for json_file in list(eval_data_dir.glob("*.json")):
+                try:
+                    import json as _json
+                    with open(json_file) as jf:
+                        data = _json.load(jf)
+                    if isinstance(data, list) and data:
+                        pd.DataFrame(data).to_csv(json_file.with_suffix(".csv"), index=False)
+                        json_file.unlink()
+                except Exception:
+                    pass
         # Re-symlink agent inputs
         eval_data_abs = eval_data_dir.resolve()
         for agent_dir in agent_dirs:

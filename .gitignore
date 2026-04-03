@@ -4,6 +4,7 @@ __pycache__/
 .eggs/
 dist/
 build/
+archived_runs/
 workspace/
 cache/
 *.log
