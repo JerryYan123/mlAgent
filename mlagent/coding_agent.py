@@ -244,11 +244,19 @@ Plan from planning agent:
 
 You MUST use tools. Available tools: execute_cell, edit_cell, check_submission, read_file, restart_kernel.
 
+## Following the Plan
+- The plan above is your primary objective for this round. Execute it faithfully.
+- If the plan asks you to try a specific model family (e.g. transformer, tree-based),
+  you MUST attempt it — do not skip it in favor of something you're more comfortable with.
+- You may adjust implementation details (hyperparameters, exact features) based on what
+  you observe, but do not substitute the plan's core goals with a different approach.
+- If a planned approach fails (e.g. package error, timeout), fix the error and retry
+  before falling back to simpler alternatives.
+
 ## Workflow
 - Start by loading and briefly exploring the data.
 - Build a working baseline that produces a valid {submission_name} as early as possible.
-- Once you have a valid submission, iterate to improve: try the plan's suggestions,
-  but also explore other promising approaches if you have steps remaining.
+- Once you have a valid submission, work on the plan's goals to improve the score.
 - Before finishing, also predict on input/holdout.csv (same features, no labels) and
   save as holdout_predictions.csv (same format as {submission_name}). This is used
   for honest validation by an independent evaluator.

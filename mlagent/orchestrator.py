@@ -98,6 +98,10 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
     eval_kernel = None
     try:
         eval_kernel = setup_eval(config, competition, run_dir, [agent_dir], tracker)
+        if eval_kernel:
+            logger.info("Eval kernel ready=%s", eval_kernel.ready)
+        else:
+            logger.warning("Eval setup returned None")
     except Exception as e:
         logger.warning("Eval setup failed: %s — proceeding without holdout", e)
 
@@ -156,7 +160,14 @@ def run_experiment(config: AgentConfig) -> dict[str, Any]:
                 holdout_score = None
                 if eval_kernel and eval_kernel.ready:
                     pred_path = agent_dir / "holdout_predictions.csv"
-                    holdout_score = eval_kernel.score(pred_path)
+                    if pred_path.exists():
+                        holdout_score = eval_kernel.score(pred_path)
+                        logger.info("  Holdout score: %s", holdout_score)
+                    else:
+                        logger.info("  holdout_predictions.csv not found — skipping holdout scoring")
+                else:
+                    logger.info("  Eval kernel not ready (kernel=%s, ready=%s)",
+                                eval_kernel is not None, getattr(eval_kernel, 'ready', None))
 
                 task_results.append({
                     "task": task_label,
